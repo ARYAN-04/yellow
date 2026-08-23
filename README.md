@@ -18,16 +18,16 @@ Yellow is a tournament tab software rebuild in Go, utilizing a per-tournament SQ
 
 ### Phase 0: Scaffolding & Dynamic DB Manager
 * Platform database `tournaments/global.db` tracks tournament registries and archives.
-* Connection manager [internal/db/manager.go](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/db/manager.go) loads SQLite files dynamically, enforcing read-only modes if flagged.
+* Connection manager [internal/db/manager.go](internal/db/manager.go) loads SQLite files dynamically, enforcing read-only modes if flagged.
 
 ### Phase 1: Tournament Operations & REST APIs
-* REST handlers for Institutions, Teams, Speakers, Adjudicators, and Rounds in [internal/api/tournament.go](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/api/tournament.go).
-* Bulk CSV upload parsers in [internal/api/csv.go](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/api/csv.go).
-* Kuhn-Munkres (Hungarian algorithm) side position balance solver and power-pairing matchmaking draws in [internal/draw/](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/draw/).
-* Token-resolved participant and adjudicator route schedules in [internal/api/token.go](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/api/token.go) and [web/src/App.tsx](file:///Users/dev-isolated/Desktop/Projects/Yellow/web/src/App.tsx).
+* REST handlers for Institutions, Teams, Speakers, Adjudicators, and Rounds in [internal/api/tournament.go](internal/api/tournament.go).
+* Bulk CSV upload parsers in [internal/api/csv.go](internal/api/csv.go).
+* Kuhn-Munkres (Hungarian algorithm) side position balance solver and power-pairing matchmaking draws in [internal/draw/](internal/draw/).
+* Token-resolved participant and adjudicator route schedules in [internal/api/token.go](internal/api/token.go) and [web/src/App.tsx](web/src/App.tsx).
 
 ### Phase 2: Archive & Read-Only Locks
-* Upload parser for ingested database archives in [internal/api/archive.go](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/api/archive.go).
+* Upload parser for ingested database archives in [internal/api/archive.go](internal/api/archive.go).
 * Write blocker middleware intercepting mutating queries (`POST`, `PUT`, `DELETE`) on archived paths returning `403 Forbidden`.
 
 ### Final UI Adjustments (Round Controls & Standings)
