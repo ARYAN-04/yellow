@@ -1,4 +1,4 @@
-module GoTabs
+module yellow
 
 go 1.26.5
 

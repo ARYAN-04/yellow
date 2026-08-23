@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"GoTabs/internal/db"
+	"yellow/internal/db"
 
 	"github.com/google/uuid"
 )

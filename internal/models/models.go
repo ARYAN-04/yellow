@@ -42,8 +42,11 @@ type Institution struct {
 
 // Speaker represents a team speaker.
 type Speaker struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	IsNovice bool   `json:"is_novice"`
+	IsEsl    bool   `json:"is_esl"`
+	IsEfl    bool   `json:"is_efl"`
 }
 
 // Team represents a tournament team with its speakers and institution.
@@ -54,7 +57,20 @@ type Team struct {
 	InstitutionID   *string   `json:"institution_id"`
 	InstitutionName *string   `json:"institution_name"`
 	InstitutionCode *string   `json:"institution_code"`
+	IsNovice        bool      `json:"is_novice"`
+	IsEsl           bool      `json:"is_esl"`
+	IsEfl           bool      `json:"is_efl"`
+	IsStandby       bool      `json:"is_standby"`
 	Speakers        []Speaker `json:"speakers"`
+}
+
+// BreakCategory represents a break qualification category.
+type BreakCategory struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Seq        int    `json:"seq"`
+	Size       *int   `json:"size"`
+	BasePoints *int   `json:"base_points"`
 }
 
 // Adjudicator represents a tournament adjudicator.
@@ -80,13 +96,16 @@ type Round struct {
 
 // TeamAssignment represents a team assigned to a side in a debate.
 type TeamAssignment struct {
+	ID       string `json:"id,omitempty"`
 	TeamID   string `json:"team_id"`
 	TeamName string `json:"team_name"`
 	Side     string `json:"side"`
+	PullUp   bool   `json:"pull_up,omitempty"`
 }
 
 // AdjudicatorAssignment represents an adjudicator assigned to a role in a debate.
 type AdjudicatorAssignment struct {
+	ID              string `json:"id,omitempty"`
 	AdjudicatorID   string `json:"adjudicator_id"`
 	AdjudicatorName string `json:"adjudicator_name"`
 	Role            string `json:"role"` // 'chair', 'panel', 'trainee'
@@ -101,10 +120,34 @@ type DebateDraw struct {
 }
 
 // TeamBallotResult represents the result points for a team.
+// AdjudicatorID is set on split (per-judge) ballots; NULL means consensus.
 type TeamBallotResult struct {
 	TeamID        string  `json:"team_id"`
 	Points        int     `json:"points"`
 	SpeakerPoints float64 `json:"speaker_points"`
+	AdjudicatorID *string `json:"adjudicator_id,omitempty"`
+}
+
+// BallotSummary represents a ballot and its results, used by the registry view.
+type BallotSummary struct {
+	ID            string             `json:"id"`
+	DebateID      string             `json:"debate_id"`
+	DebateVenue   string             `json:"debate_venue"`
+	SubmitterType string             `json:"submitter_type"`
+	SubmitterName string             `json:"submitter_name"`
+	Status        string             `json:"status"`
+	IsSplit       bool               `json:"is_split"`
+	EntryGroup    *string            `json:"entry_group,omitempty"`
+	Results       []TeamBallotResult `json:"results"`
+}
+
+// BallotDiff describes a single field mismatch between two double-entry ballots.
+type BallotDiff struct {
+	TeamID        string   `json:"team_id"`
+	AdjudicatorID *string  `json:"adjudicator_id,omitempty"`
+	Field         string   `json:"field"` // 'points', 'speaker_points'
+	BallotA       *float64 `json:"ballot_a"`
+	BallotB       *float64 `json:"ballot_b"`
 }
 
 // Standing represents a team's current rank and scores.
@@ -115,6 +158,7 @@ type Standing struct {
 	InstitutionCode string  `json:"institution_code"`
 	Points          int     `json:"points"`
 	SpeakerPoints   float64 `json:"speaker_points"`
+	Margin          float64 `json:"margin"`
 }
 
 // TokenInfo represents the resolved access token details.
@@ -137,6 +181,47 @@ type DebateInfo struct {
 	BallotStatus  string           `json:"ballot_status,omitempty"`
 	Points        *int             `json:"points,omitempty"`
 	SpeakerPoints *float64         `json:"speaker_points,omitempty"`
+}
+
+// BreakTeam represents one team's position in a break category.
+type BreakTeam struct {
+	Rank          int     `json:"rank"`
+	TeamID        string  `json:"team_id"`
+	TeamName      string  `json:"team_name"`
+	Points        int     `json:"points"`
+	SpeakerPoints float64 `json:"speaker_points"`
+	Margin        float64 `json:"margin"`
+	IsNovice      bool    `json:"is_novice"`
+	IsEsl         bool    `json:"is_esl"`
+	IsEfl         bool    `json:"is_efl"`
+	Bubble        bool    `json:"bubble"`
+}
+
+// BreakResult is the computed (or persisted) qualifier list for one break category.
+type BreakResult struct {
+	CategoryID   string      `json:"category_id"`
+	CategoryName string      `json:"category_name"`
+	Size         *int        `json:"size"`
+	Cutoff       int         `json:"cutoff"`
+	Qualifiers   []BreakTeam `json:"qualifiers"`
+}
+
+// BracketDebate is one knockout debate; Bye debates carry a single team.
+type BracketDebate struct {
+	ID              string           `json:"id"`
+	Venue           string           `json:"venue"`
+	BracketPosition *int             `json:"bracket_position"`
+	Bye             bool             `json:"bye"`
+	Teams           []TeamAssignment `json:"teams"`
+	WinnerTeamID    *string          `json:"winner_team_id"`
+}
+
+// BracketRound is one elimination round in the bracket visualizer.
+type BracketRound struct {
+	ID      string          `json:"id"`
+	Seq     int             `json:"seq"`
+	Name    string          `json:"name"`
+	Debates []BracketDebate `json:"debates"`
 }
 
 // TokenOwner represents the resolved token owner type and ID.
@@ -165,11 +250,96 @@ type AdjudicatorImport struct {
 	TestScore       float64
 }
 
+// Conflict represents a declared clash between two draw entities.
+type Conflict struct {
+	ID          string `json:"id"`
+	SubjectType string `json:"subject_type"` // 'adjudicator', 'team'
+	SubjectID   string `json:"subject_id"`
+	SubjectName string `json:"subject_name"`
+	TargetType  string `json:"target_type"` // 'team', 'speaker', 'adjudicator', 'institution'
+	TargetID    string `json:"target_id"`
+	TargetName  string `json:"target_name"`
+	Weight      string `json:"weight"` // 'hard', 'soft'
+}
+
+// FeedbackQuestion represents a configurable feedback questionnaire item.
+type FeedbackQuestion struct {
+	ID       string   `json:"id"`
+	Seq      int      `json:"seq"`
+	Type     string   `json:"type"` // 'scale', 'text', 'checkbox', 'select'
+	Name     string   `json:"name"`
+	Options  []string `json:"options"`
+	Required bool     `json:"required"`
+	FromType string   `json:"from_type"` // 'team', 'adjudicator'
+	ToType   string   `json:"to_type"`   // 'adjudicator'
+}
+
+// FeedbackSubmission represents a submitted feedback answer set for an adjudicator.
+type FeedbackSubmission struct {
+	ID         string            `json:"id"`
+	RoundID    string            `json:"round_id"`
+	DebateID   string            `json:"debate_id"`
+	SourceType string            `json:"source_type"` // 'team', 'adjudicator'
+	SourceID   string            `json:"source_id"`
+	SourceName string            `json:"source_name"`
+	TargetID   string            `json:"target_adjudicator_id"`
+	TargetName string            `json:"target_name"`
+	Score      *float64          `json:"score"`
+	CreatedAt  string            `json:"created_at"`
+	Answers    map[string]string `json:"answers"`
+}
+
+// FeedbackTarget describes an adjudicator a token holder may evaluate in a given debate.
+type FeedbackTarget struct {
+	DebateID        string `json:"debate_id"`
+	Venue           string `json:"venue"`
+	RoundName       string `json:"round_name"`
+	AdjudicatorID   string `json:"adjudicator_id"`
+	AdjudicatorName string `json:"adjudicator_name"`
+	Role            string `json:"role"` // 'chair', 'panel'
+}
+
+// Checkin represents the check-in state of a draw entity with its QR token.
+type Checkin struct {
+	EntityType   string `json:"entity_type"`
+	EntityID     string `json:"entity_id"`
+	EntityName   string `json:"entity_name"`
+	CheckedIn    bool   `json:"checked_in"`
+	CheckinToken string `json:"checkin_token"`
+}
+
+// CheckinTokenInfo is the payload returned by check-in token endpoints;
+// EntityID is internal bookkeeping and never serialized.
+type CheckinTokenInfo struct {
+	EntityType string `json:"entity_type"`
+	EntityName string `json:"entity_name"`
+	CheckedIn  bool   `json:"checked_in"`
+	EntityID   string `json:"-"`
+}
+
+// AvailabilityOverride represents a single round availability row.
+type AvailabilityOverride struct {
+	EntityType  string `json:"entity_type"`
+	EntityID    string `json:"entity_id"`
+	IsAvailable bool   `json:"is_available"`
+}
+
+// AvailabilityEntry describes one team/adjudicator's availability for a round;
+// a nil IsAvailable means no override exists (default available).
+type AvailabilityEntry struct {
+	EntityType  string `json:"entity_type"`
+	EntityID    string `json:"entity_id"`
+	Name        string `json:"name"`
+	IsAvailable *bool  `json:"is_available"`
+	CheckedIn   bool   `json:"checked_in"`
+}
+
 // Draw-specific models to communicate between draw algorithm and store:
 
 type TeamDrawInfo struct {
 	ID            string
 	InstitutionID string
+	Standby       bool
 }
 
 type SideHistKey struct {
@@ -184,8 +354,9 @@ type AdjDrawInfo struct {
 }
 
 type DebateDrawInput struct {
-	DebateID     string
-	Venue        string
-	Teams        []TeamAssignment
-	Adjudicators []AdjudicatorAssignment
+	DebateID        string
+	Venue           string
+	BracketPosition int
+	Teams           []TeamAssignment
+	Adjudicators    []AdjudicatorAssignment
 }

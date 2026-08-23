@@ -2,9 +2,11 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
+	"sort"
 	"strings"
 
-	"GoTabs/internal/models"
+	"yellow/internal/models"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
@@ -21,7 +23,19 @@ type TournamentStore interface {
 	// Teams & Speakers
 	ListTeams() ([]models.Team, error)
 	CreateTeam(teamID, name, code, instID string, speakers []models.SpeakerRequest, token string) error
+	UpdateTeam(teamID string, name, code, instID *string, novice, esl, efl, standby *bool) error
+	UpsertSpeaker(teamID string, sp models.Speaker) error
 	DeleteTeam(id string) error
+
+	// Config
+	GetConfig(key string) (string, error)
+	SetConfig(key, value string) error
+
+	// Break Categories
+	ListBreakCategories() ([]models.BreakCategory, error)
+	CreateBreakCategory(c models.BreakCategory) error
+	UpdateBreakCategory(c models.BreakCategory) error
+	DeleteBreakCategory(id string) error
 
 	// Adjudicators
 	ListAdjudicators() ([]models.Adjudicator, error)
@@ -43,10 +57,53 @@ type TournamentStore interface {
 	GetAdjudicatorsForDraw() ([]models.AdjDrawInfo, error)
 	SaveDraw(roundID string, debates []models.DebateDrawInput) error
 
+	// Conflicts
+	ListConflicts() ([]models.Conflict, error)
+	CreateConflict(subjectType, subjectID, targetType, targetID, weight string) error
+	DeleteConflict(id string) error
+	GetConflictsForDraw() ([]models.Conflict, error)
+	GetDebateConflicts(debateID string) (hard []string, soft []string, err error)
+
+	// Feedback
+	ListFeedbackQuestions(fromType, toType string) ([]models.FeedbackQuestion, error)
+	CreateFeedbackQuestion(q models.FeedbackQuestion) (models.FeedbackQuestion, error)
+	UpdateFeedbackQuestion(q models.FeedbackQuestion) error
+	DeleteFeedbackQuestion(id string) error
+	MoveFeedbackQuestion(id, direction string) error
+	ListFeedbackSubmissions(roundID string) ([]models.FeedbackSubmission, error)
+	GetFeedbackTargets(ownerType, ownerID string) ([]models.FeedbackTarget, error)
+	SubmitFeedback(debateID, sourceType, sourceID, targetAdjID string, score *float64, answers map[string]string) error
+	RecalcAdjudicatorRatings() error
+
+	// Manual allocations
+	MoveSwapTeamAssignment(assignmentID, targetDebateID string) (roundID string, err error)
+	MoveSwapAdjudicatorAssignment(assignmentID, targetDebateID, role string) (roundID string, err error)
+
 	// Ballots & Standings
-	SubmitBallot(debateID, ballotID, submitterType, submitterID, status string, results []models.TeamBallotResult) error
+	SubmitBallot(debateID, ballotID, submitterType, submitterID, status string, isSplit bool, entryGroup string, results []models.TeamBallotResult) error
 	ConfirmBallot(ballotID string) error
+	SetBallotStatus(ballotID, status string) error
+	GetBallotByID(ballotID string) (*models.BallotSummary, error)
+	GetBallotsForRound(roundID string) ([]models.BallotSummary, error)
+	CompareEntryGroup(group string) (ballots []models.BallotSummary, match bool, diffs []models.BallotDiff, err error)
 	GetStandings() ([]models.Standing, error)
+	GetStandingsWithPrecedence(precedence []string, filterCategory string) ([]models.Standing, error)
+	GetStandingsWithPrecedenceEx(precedence []string, filterCategory string, includeSilent bool) ([]models.Standing, error)
+
+	// Breaks & Brackets
+	ComputeBreak(categoryID string) (*models.BreakResult, error)
+	SaveBreakSnapshot(categoryID string, teams []models.BreakTeam) error
+	GenerateBracket(roundID, categoryID string) error
+	AdvanceEliminationRound(roundID string) (string, error)
+	GetBracket() ([]models.BracketRound, error)
+
+	// Check-ins & Availability
+	ListCheckins() ([]models.Checkin, error)
+	SetCheckedIn(entityType, entityID string, checkedIn bool) error
+	ResolveCheckinToken(token string) (*models.CheckinTokenInfo, error)
+	GetRoundAvailability(roundID string) ([]models.AvailabilityOverride, error)
+	SetRoundAvailability(roundID, entityType, entityID string, isAvailable bool) error
+	SyncAvailabilityFromCheckins(roundID string) error
 
 	// Tokens & Public Portal
 	ResolveToken(token string) (*models.TokenInfo, error)
@@ -138,7 +195,7 @@ func (s *SQLTournamentStore) DeleteInstitution(id string) error {
 
 func (s *SQLTournamentStore) ListTeams() ([]models.Team, error) {
 	rows, err := s.db.Query(`
-		SELECT t.id, t.name, t.code, t.institution_id, i.name, i.code 
+		SELECT t.id, t.name, t.code, t.institution_id, i.name, i.code, COALESCE(t.is_novice, 0), COALESCE(t.is_esl, 0), COALESCE(t.is_efl, 0), COALESCE(t.is_standby, 0)
 		FROM teams t
 		LEFT JOIN institutions i ON t.institution_id = i.id
 		ORDER BY t.name ASC
@@ -153,7 +210,7 @@ func (s *SQLTournamentStore) ListTeams() ([]models.Team, error) {
 	for rows.Next() {
 		var t models.Team
 		var instID, instName, instCode sql.NullString
-		if err := rows.Scan(&t.ID, &t.Name, &t.Code, &instID, &instName, &instCode); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Code, &instID, &instName, &instCode, &t.IsNovice, &t.IsEsl, &t.IsEfl, &t.IsStandby); err != nil {
 			return nil, err
 		}
 		if instID.Valid {
@@ -166,22 +223,186 @@ func (s *SQLTournamentStore) ListTeams() ([]models.Team, error) {
 		teamMap[t.ID] = &list[len(list)-1]
 	}
 
-	spRows, err := s.db.Query("SELECT id, name, team_id FROM speakers")
+	spRows, err := s.db.Query("SELECT id, name, team_id, is_novice, is_esl, is_efl FROM speakers")
 	if err != nil {
 		return nil, err
 	}
 	defer spRows.Close()
 
 	for spRows.Next() {
-		var spID, name, teamID string
-		if err := spRows.Scan(&spID, &name, &teamID); err != nil {
+		var sp models.Speaker
+		var teamID string
+		if err := spRows.Scan(&sp.ID, &sp.Name, &teamID, &sp.IsNovice, &sp.IsEsl, &sp.IsEfl); err != nil {
 			return nil, err
 		}
 		if t, ok := teamMap[teamID]; ok {
-			t.Speakers = append(t.Speakers, models.Speaker{ID: spID, Name: name})
+			t.Speakers = append(t.Speakers, sp)
 		}
 	}
 	return list, nil
+}
+
+func (s *SQLTournamentStore) UpdateTeam(teamID string, name, code, instID *string, novice, esl, efl, standby *bool) error {
+	query := "UPDATE teams SET "
+	var updates []string
+	var params []interface{}
+
+	if name != nil {
+		updates = append(updates, "name = ?")
+		params = append(params, *name)
+	}
+	if code != nil {
+		updates = append(updates, "code = ?")
+		params = append(params, *code)
+	}
+	if instID != nil {
+		updates = append(updates, "institution_id = ?")
+		params = append(params, *instID)
+	}
+	if novice != nil {
+		updates = append(updates, "is_novice = ?")
+		params = append(params, *novice)
+	}
+	if esl != nil {
+		updates = append(updates, "is_esl = ?")
+		params = append(params, *esl)
+	}
+	if efl != nil {
+		updates = append(updates, "is_efl = ?")
+		params = append(params, *efl)
+	}
+	if standby != nil {
+		updates = append(updates, "is_standby = ?")
+		params = append(params, *standby)
+	}
+
+	if len(updates) == 0 {
+		return nil
+	}
+
+	query += strings.Join(updates, ", ") + " WHERE id = ?"
+	params = append(params, teamID)
+
+	res, err := s.db.Exec(query, params...)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SQLTournamentStore) UpsertSpeaker(teamID string, sp models.Speaker) error {
+	name := strings.TrimSpace(sp.Name)
+	if name == "" && sp.ID != "" {
+		var existing string
+		err := s.db.QueryRow("SELECT name FROM speakers WHERE id = ?", sp.ID).Scan(&existing)
+		if err != nil {
+			return err
+		}
+		name = existing
+	}
+
+	var existingTeamID string
+	err := s.db.QueryRow("SELECT team_id FROM speakers WHERE id = ?", sp.ID).Scan(&existingTeamID)
+	if err == nil {
+		if existingTeamID != teamID {
+			return fmt.Errorf("speaker %s does not belong to team %s", sp.ID, teamID)
+		}
+		_, err = s.db.Exec("UPDATE speakers SET name = ?, is_novice = ?, is_esl = ?, is_efl = ? WHERE id = ?", name, sp.IsNovice, sp.IsEsl, sp.IsEfl, sp.ID)
+		return err
+	}
+	if err != sql.ErrNoRows {
+		return err
+	}
+
+	id := sp.ID
+	if id == "" {
+		id = uuid.New().String()
+	}
+	_, err = s.db.Exec("INSERT INTO speakers (id, name, team_id, is_novice, is_esl, is_efl) VALUES (?, ?, ?, ?, ?, ?)", id, name, teamID, sp.IsNovice, sp.IsEsl, sp.IsEfl)
+	return err
+}
+
+func (s *SQLTournamentStore) GetConfig(key string) (string, error) {
+	var val string
+	err := s.db.QueryRow("SELECT value FROM config WHERE key = ?", key).Scan(&val)
+	if err != nil {
+		return "", err
+	}
+	return val, nil
+}
+
+func (s *SQLTournamentStore) SetConfig(key, value string) error {
+	_, err := s.db.Exec("INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", key, value)
+	return err
+}
+
+func (s *SQLTournamentStore) ListBreakCategories() ([]models.BreakCategory, error) {
+	rows, err := s.db.Query("SELECT id, name, seq, size, base_points FROM break_categories ORDER BY seq ASC, name ASC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []models.BreakCategory
+	for rows.Next() {
+		var c models.BreakCategory
+		var size, basePoints sql.NullInt64
+		if err := rows.Scan(&c.ID, &c.Name, &c.Seq, &size, &basePoints); err != nil {
+			return nil, err
+		}
+		if size.Valid {
+			v := int(size.Int64)
+			c.Size = &v
+		}
+		if basePoints.Valid {
+			v := int(basePoints.Int64)
+			c.BasePoints = &v
+		}
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+func (s *SQLTournamentStore) CreateBreakCategory(c models.BreakCategory) error {
+	_, err := s.db.Exec("INSERT INTO break_categories (id, name, seq, size, base_points) VALUES (?, ?, ?, ?, ?)", c.ID, c.Name, c.Seq, c.Size, c.BasePoints)
+	return err
+}
+
+func (s *SQLTournamentStore) UpdateBreakCategory(c models.BreakCategory) error {
+	res, err := s.db.Exec("UPDATE break_categories SET name = ?, seq = ?, size = ?, base_points = ? WHERE id = ?", c.Name, c.Seq, c.Size, c.BasePoints, c.ID)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SQLTournamentStore) DeleteBreakCategory(id string) error {
+	res, err := s.db.Exec("DELETE FROM break_categories WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *SQLTournamentStore) CreateTeam(teamID, name, code, instID string, speakers []models.SpeakerRequest, token string) error {
@@ -369,7 +590,6 @@ func (s *SQLTournamentStore) GetRoundDraw(roundID string) ([]models.DebateDraw, 
 	defer rows.Close()
 
 	var debates []models.DebateDraw
-	debateMap := make(map[string]*models.DebateDraw)
 
 	for rows.Next() {
 		var d models.DebateDraw
@@ -379,24 +599,30 @@ func (s *SQLTournamentStore) GetRoundDraw(roundID string) ([]models.DebateDraw, 
 		d.Teams = []models.TeamAssignment{}
 		d.Adjudicators = []models.AdjudicatorAssignment{}
 		debates = append(debates, d)
-		debateMap[d.ID] = &debates[len(debates)-1]
 	}
 
 	if len(debates) == 0 {
 		return debates, nil
 	}
 
+	debateMap := make(map[string]*models.DebateDraw, len(debates))
+	for i := range debates {
+		debateMap[debates[i].ID] = &debates[i]
+	}
+
 	tRows, err := s.db.Query(`
-		SELECT dt.debate_id, dt.team_id, t.name, dt.side 
+		SELECT dt.debate_id, dt.id, dt.team_id, t.name, dt.side, COALESCE(dt.pull_up, 0)
 		FROM debate_teams dt
 		JOIN teams t ON dt.team_id = t.id
 	`)
 	if err == nil {
 		for tRows.Next() {
 			var dID, tID, tName, side string
-			if err := tRows.Scan(&dID, &tID, &tName, &side); err == nil {
+			var assignmentID string
+			var pullUp bool
+			if err := tRows.Scan(&dID, &assignmentID, &tID, &tName, &side, &pullUp); err == nil {
 				if d, ok := debateMap[dID]; ok {
-					d.Teams = append(d.Teams, models.TeamAssignment{TeamID: tID, TeamName: tName, Side: side})
+					d.Teams = append(d.Teams, models.TeamAssignment{ID: assignmentID, TeamID: tID, TeamName: tName, Side: side, PullUp: pullUp})
 				}
 			}
 		}
@@ -404,16 +630,17 @@ func (s *SQLTournamentStore) GetRoundDraw(roundID string) ([]models.DebateDraw, 
 	}
 
 	aRows, err := s.db.Query(`
-		SELECT da.debate_id, da.adjudicator_id, a.name, da.role 
+		SELECT da.debate_id, da.id, da.adjudicator_id, a.name, da.role
 		FROM debate_adjudicators da
 		JOIN adjudicators a ON da.adjudicator_id = a.id
 	`)
 	if err == nil {
 		for aRows.Next() {
 			var dID, aID, aName, role string
-			if err := aRows.Scan(&dID, &aID, &aName, &role); err == nil {
+			var assignmentID string
+			if err := aRows.Scan(&dID, &assignmentID, &aID, &aName, &role); err == nil {
 				if d, ok := debateMap[dID]; ok {
-					d.Adjudicators = append(d.Adjudicators, models.AdjudicatorAssignment{AdjudicatorID: aID, AdjudicatorName: aName, Role: role})
+					d.Adjudicators = append(d.Adjudicators, models.AdjudicatorAssignment{ID: assignmentID, AdjudicatorID: aID, AdjudicatorName: aName, Role: role})
 				}
 			}
 		}
@@ -430,7 +657,7 @@ func (s *SQLTournamentStore) GetSidesConfig() (string, error) {
 }
 
 func (s *SQLTournamentStore) GetTeamsForDraw() ([]models.TeamDrawInfo, error) {
-	rows, err := s.db.Query("SELECT id, institution_id FROM teams")
+	rows, err := s.db.Query("SELECT id, institution_id, COALESCE(is_standby, 0) FROM teams")
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +667,7 @@ func (s *SQLTournamentStore) GetTeamsForDraw() ([]models.TeamDrawInfo, error) {
 	for rows.Next() {
 		var t models.TeamDrawInfo
 		var instID sql.NullString
-		if err := rows.Scan(&t.ID, &instID); err != nil {
+		if err := rows.Scan(&t.ID, &instID, &t.Standby); err != nil {
 			return nil, err
 		}
 		if instID.Valid {
@@ -503,7 +730,7 @@ func (s *SQLTournamentStore) GetConfirmedPoints() (map[string]int, error) {
 }
 
 func (s *SQLTournamentStore) GetAdjudicatorsForDraw() ([]models.AdjDrawInfo, error) {
-	rows, err := s.db.Query("SELECT id, institution_id, test_score FROM adjudicators")
+	rows, err := s.db.Query("SELECT id, institution_id, COALESCE(rating, test_score) FROM adjudicators")
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +777,11 @@ func (s *SQLTournamentStore) SaveDraw(roundID string, debates []models.DebateDra
 	_, _ = tx.Exec("DELETE FROM debates WHERE round_id = ?", roundID)
 
 	for _, d := range debates {
-		_, err = tx.Exec("INSERT INTO debates (id, round_id, venue) VALUES (?, ?, ?)", d.DebateID, roundID, d.Venue)
+		var posVal interface{}
+		if d.BracketPosition > 0 {
+			posVal = d.BracketPosition
+		}
+		_, err = tx.Exec("INSERT INTO debates (id, round_id, venue, bracket_position) VALUES (?, ?, ?, ?)", d.DebateID, roundID, d.Venue, posVal)
 		if err != nil {
 			return err
 		}
@@ -558,8 +789,8 @@ func (s *SQLTournamentStore) SaveDraw(roundID string, debates []models.DebateDra
 		for _, t := range d.Teams {
 			dtID := uuid.New().String()
 			_, err = tx.Exec(
-				"INSERT INTO debate_teams (id, debate_id, team_id, side) VALUES (?, ?, ?, ?)",
-				dtID, d.DebateID, t.TeamID, t.Side,
+				"INSERT INTO debate_teams (id, debate_id, team_id, side, pull_up) VALUES (?, ?, ?, ?, ?)",
+				dtID, d.DebateID, t.TeamID, t.Side, t.PullUp,
 			)
 			if err != nil {
 				return err
@@ -581,7 +812,7 @@ func (s *SQLTournamentStore) SaveDraw(roundID string, debates []models.DebateDra
 	return tx.Commit()
 }
 
-func (s *SQLTournamentStore) SubmitBallot(debateID, ballotID, submitterType, submitterID, status string, results []models.TeamBallotResult) error {
+func (s *SQLTournamentStore) SubmitBallot(debateID, ballotID, submitterType, submitterID, status string, isSplit bool, entryGroup string, results []models.TeamBallotResult) error {
 	var roundID string
 	err := s.db.QueryRow("SELECT round_id FROM debates WHERE id = ?", debateID).Scan(&roundID)
 	if err != nil {
@@ -594,6 +825,16 @@ func (s *SQLTournamentStore) SubmitBallot(debateID, ballotID, submitterType, sub
 	}
 	defer tx.Rollback()
 
+	if entryGroup != "" {
+		_, err = tx.Exec(
+			"DELETE FROM ballots WHERE entry_group = ? AND submitter_type = ? AND COALESCE(submitter_id, '') = ? AND status != 'confirmed'",
+			entryGroup, submitterType, submitterID,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
 	var subIDVal interface{}
 	if submitterID != "" {
 		subIDVal = submitterID
@@ -601,9 +842,16 @@ func (s *SQLTournamentStore) SubmitBallot(debateID, ballotID, submitterType, sub
 		subIDVal = nil
 	}
 
+	var groupVal interface{}
+	if entryGroup != "" {
+		groupVal = entryGroup
+	} else {
+		groupVal = nil
+	}
+
 	_, err = tx.Exec(
-		"INSERT INTO ballots (id, debate_id, round_id, submitter_type, submitter_id, status) VALUES (?, ?, ?, ?, ?, ?)",
-		ballotID, debateID, roundID, submitterType, subIDVal, status,
+		"INSERT INTO ballots (id, debate_id, round_id, submitter_type, submitter_id, status, is_split, entry_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		ballotID, debateID, roundID, submitterType, subIDVal, status, isSplit, groupVal,
 	)
 	if err != nil {
 		return err
@@ -611,9 +859,15 @@ func (s *SQLTournamentStore) SubmitBallot(debateID, ballotID, submitterType, sub
 
 	for _, res := range results {
 		brID := uuid.New().String()
+		var adjVal interface{}
+		if res.AdjudicatorID != nil && *res.AdjudicatorID != "" {
+			adjVal = *res.AdjudicatorID
+		} else {
+			adjVal = nil
+		}
 		_, err = tx.Exec(
-			"INSERT INTO ballot_results (id, ballot_id, team_id, points, speaker_points) VALUES (?, ?, ?, ?, ?)",
-			brID, ballotID, res.TeamID, res.Points, res.SpeakerPoints,
+			"INSERT INTO ballot_results (id, ballot_id, team_id, points, speaker_points, adjudicator_id) VALUES (?, ?, ?, ?, ?, ?)",
+			brID, ballotID, res.TeamID, res.Points, res.SpeakerPoints, adjVal,
 		)
 		if err != nil {
 			return err
@@ -638,53 +892,178 @@ func (s *SQLTournamentStore) ConfirmBallot(ballotID string) error {
 	return nil
 }
 
-func (s *SQLTournamentStore) GetStandings() ([]models.Standing, error) {
+func (s *SQLTournamentStore) computeStandings(includeSilent bool) ([]models.Standing, map[string][3]bool, error) {
 	tRows, err := s.db.Query(`
-		SELECT t.id, t.name, t.code, i.code 
+		SELECT t.id, t.name, t.code, i.code, t.is_novice, t.is_esl, t.is_efl
 		FROM teams t
 		LEFT JOIN institutions i ON t.institution_id = i.id
 	`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer tRows.Close()
 
 	var list []models.Standing
-	teamMap := make(map[string]*models.Standing)
-
+	flags := make(map[string][3]bool)
 	for tRows.Next() {
 		var ts models.Standing
 		var instCode sql.NullString
-		if err := tRows.Scan(&ts.TeamID, &ts.TeamName, &ts.TeamCode, &instCode); err != nil {
-			return nil, err
+		var f [3]bool
+		if err := tRows.Scan(&ts.TeamID, &ts.TeamName, &ts.TeamCode, &instCode, &f[0], &f[1], &f[2]); err != nil {
+			return nil, nil, err
 		}
 		if instCode.Valid {
 			ts.InstitutionCode = instCode.String
 		}
 		list = append(list, ts)
-		teamMap[ts.TeamID] = &list[len(list)-1]
+		flags[ts.TeamID] = f
 	}
 
+	type resultRow struct {
+		ballotID string
+		teamID   string
+		points   int
+		spts     float64
+	}
+	var rows []resultRow
 	pRows, err := s.db.Query(`
-		SELECT br.team_id, br.points, br.speaker_points
+		SELECT b.id, br.team_id, br.points, br.speaker_points
 		FROM ballot_results br
 		JOIN ballots b ON br.ballot_id = b.id
-		WHERE b.status = 'confirmed'
-	`)
-	if err == nil {
-		for pRows.Next() {
-			var tid string
-			var pts int
-			var spts float64
-			if err := pRows.Scan(&tid, &pts, &spts); err == nil {
-				if ts, ok := teamMap[tid]; ok {
-					ts.Points += pts
-					ts.SpeakerPoints += spts
-				}
+		JOIN rounds r ON b.round_id = r.id
+		WHERE b.status = 'confirmed' AND (? OR r.silent = 0 OR r.results_released = 1)
+		ORDER BY b.id ASC
+	`, includeSilent)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer pRows.Close()
+	for pRows.Next() {
+		var rr resultRow
+		if err := pRows.Scan(&rr.ballotID, &rr.teamID, &rr.points, &rr.spts); err != nil {
+			return nil, nil, err
+		}
+		rows = append(rows, rr)
+	}
+
+	standByTeam := make(map[string]*models.Standing)
+	for i := range list {
+		standByTeam[list[i].TeamID] = &list[i]
+	}
+
+	i := 0
+	for i < len(rows) {
+		j := i
+		for j < len(rows) && rows[j].ballotID == rows[i].ballotID {
+			j++
+		}
+		total := 0
+		for _, rr := range rows[i:j] {
+			total += rr.points
+		}
+		n := j - i
+		for _, rr := range rows[i:j] {
+			ts, ok := standByTeam[rr.teamID]
+			if !ok {
+				continue
+			}
+			ts.Points += rr.points
+			ts.SpeakerPoints += rr.spts
+			if n > 1 {
+				ts.Margin += float64(rr.points) - float64(total-rr.points)/float64(n-1)
 			}
 		}
-		pRows.Close()
+		i = j
 	}
+
+	return list, flags, nil
+}
+
+var validPrecedenceKeys = map[string]bool{
+	"points":         true,
+	"speaker_points": true,
+	"margin":         true,
+}
+
+func (s *SQLTournamentStore) GetStandings() ([]models.Standing, error) {
+	list, _, err := s.computeStandings(true)
+	return list, err
+}
+
+// GetStandingsWithPrecedence computes standings with full visibility (admin semantics).
+func (s *SQLTournamentStore) GetStandingsWithPrecedence(precedence []string, filterCategory string) ([]models.Standing, error) {
+	return s.GetStandingsWithPrecedenceEx(precedence, filterCategory, true)
+}
+
+// GetStandingsWithPrecedenceEx optionally excludes confirmed ballots from silent,
+// unreleased rounds so non-admin viewers cannot infer hidden results.
+func (s *SQLTournamentStore) GetStandingsWithPrecedenceEx(precedence []string, filterCategory string, includeSilent bool) ([]models.Standing, error) {
+	list, flags, err := s.computeStandings(includeSilent)
+	if err != nil {
+		return nil, err
+	}
+
+	switch filterCategory {
+	case "":
+	case "novice", "esl", "efl":
+		idx := map[string]int{"novice": 0, "esl": 1, "efl": 2}[filterCategory]
+		filtered := make([]models.Standing, 0)
+		for _, ts := range list {
+			if flags[ts.TeamID][idx] {
+				filtered = append(filtered, ts)
+			}
+		}
+		list = filtered
+	default:
+		cats, err := s.ListBreakCategories()
+		if err != nil {
+			return nil, err
+		}
+		var basePoints *int
+		for _, c := range cats {
+			if c.ID == filterCategory {
+				basePoints = c.BasePoints
+				break
+			}
+		}
+		if basePoints != nil {
+			filtered := make([]models.Standing, 0)
+			for _, ts := range list {
+				if ts.Points >= *basePoints {
+					filtered = append(filtered, ts)
+				}
+			}
+			list = filtered
+		}
+	}
+
+	keys := make([]string, 0, len(precedence))
+	for _, k := range precedence {
+		if validPrecedenceKeys[k] {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		keys = []string{"points", "speaker_points", "margin"}
+	}
+
+	sort.SliceStable(list, func(a, b int) bool {
+		for _, k := range keys {
+			var av, bv float64
+			switch k {
+			case "points":
+				av, bv = float64(list[a].Points), float64(list[b].Points)
+			case "speaker_points":
+				av, bv = list[a].SpeakerPoints, list[b].SpeakerPoints
+			case "margin":
+				av, bv = list[a].Margin, list[b].Margin
+			}
+			if av != bv {
+				return av > bv
+			}
+		}
+		return false
+	})
 
 	return list, nil
 }
@@ -800,7 +1179,7 @@ func (s *SQLTournamentStore) SubmitTokenBallot(debateID, ballotID, adjID string,
 		return models.ErrNotAssigned
 	}
 
-	return s.SubmitBallot(debateID, ballotID, "adjudicator", adjID, "submitted", results)
+	return s.SubmitBallot(debateID, ballotID, "adjudicator", adjID, "submitted", false, "", results)
 }
 
 func (s *SQLTournamentStore) ValidateToken(token string) (*models.TokenOwner, error) {
@@ -1033,6 +1412,10 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := applyColumnMigrations(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &SQLiteStore{
 		SQLTournamentStore: NewSQLTournamentStore(db),
 	}, nil
@@ -1058,6 +1441,10 @@ func NewLibSQLStore(url string) (*LibSQLStore, error) {
 	}
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(TournamentSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := applyColumnMigrations(db); err != nil {
 		db.Close()
 		return nil, err
 	}

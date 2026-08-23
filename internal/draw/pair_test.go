@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"GoTabs/internal/db"
+	"yellow/internal/db"
 )
 
 func TestGenerateDrawRound1(t *testing.T) {

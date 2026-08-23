@@ -1,6 +1,6 @@
-# GoTabs (Tabbycat-Go)
+# Yellow (Tabbycat-Go)
 
-GoTabs is a tournament tab software rebuild in Go, utilizing a per-tournament SQLite database architecture, a pure Go build pipeline (no CGO dependencies), and a modern React client SPA compiled directly into the executable binary.
+Yellow is a tournament tab software rebuild in Go, utilizing a per-tournament SQLite database architecture, a pure Go build pipeline (no CGO dependencies), and a modern React client SPA compiled directly into the executable binary.
 
 ---
 
@@ -18,16 +18,16 @@ GoTabs is a tournament tab software rebuild in Go, utilizing a per-tournament SQ
 
 ### Phase 0: Scaffolding & Dynamic DB Manager
 * Platform database `tournaments/global.db` tracks tournament registries and archives.
-* Connection manager [internal/db/manager.go](file:///Users/dev-isolated/Desktop/Projects/GoTabs/internal/db/manager.go) loads SQLite files dynamically, enforcing read-only modes if flagged.
+* Connection manager [internal/db/manager.go](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/db/manager.go) loads SQLite files dynamically, enforcing read-only modes if flagged.
 
 ### Phase 1: Tournament Operations & REST APIs
-* REST handlers for Institutions, Teams, Speakers, Adjudicators, and Rounds in [internal/api/tournament.go](file:///Users/dev-isolated/Desktop/Projects/GoTabs/internal/api/tournament.go).
-* Bulk CSV upload parsers in [internal/api/csv.go](file:///Users/dev-isolated/Desktop/Projects/GoTabs/internal/api/csv.go).
-* Kuhn-Munkres (Hungarian algorithm) side position balance solver and power-pairing matchmaking draws in [internal/draw/](file:///Users/dev-isolated/Desktop/Projects/GoTabs/internal/draw/).
-* Token-resolved participant and adjudicator route schedules in [internal/api/token.go](file:///Users/dev-isolated/Desktop/Projects/GoTabs/internal/api/token.go) and [web/src/App.tsx](file:///Users/dev-isolated/Desktop/Projects/GoTabs/web/src/App.tsx).
+* REST handlers for Institutions, Teams, Speakers, Adjudicators, and Rounds in [internal/api/tournament.go](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/api/tournament.go).
+* Bulk CSV upload parsers in [internal/api/csv.go](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/api/csv.go).
+* Kuhn-Munkres (Hungarian algorithm) side position balance solver and power-pairing matchmaking draws in [internal/draw/](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/draw/).
+* Token-resolved participant and adjudicator route schedules in [internal/api/token.go](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/api/token.go) and [web/src/App.tsx](file:///Users/dev-isolated/Desktop/Projects/Yellow/web/src/App.tsx).
 
 ### Phase 2: Archive & Read-Only Locks
-* Upload parser for ingested database archives in [internal/api/archive.go](file:///Users/dev-isolated/Desktop/Projects/GoTabs/internal/api/archive.go).
+* Upload parser for ingested database archives in [internal/api/archive.go](file:///Users/dev-isolated/Desktop/Projects/Yellow/internal/api/archive.go).
 * Write blocker middleware intercepting mutating queries (`POST`, `PUT`, `DELETE`) on archived paths returning `403 Forbidden`.
 
 ### Final UI Adjustments (Round Controls & Standings)

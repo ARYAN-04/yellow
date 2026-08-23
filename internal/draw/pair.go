@@ -8,195 +8,237 @@ import (
 	"strings"
 	"time"
 
-	"GoTabs/internal/db"
-	"GoTabs/internal/models"
+	"yellow/internal/db"
+	"yellow/internal/models"
 
 	"github.com/google/uuid"
 )
 
-// GenerateDraw runs the bracket power pairing, side-balancing, and adjudicator allocation for a round.
-func GenerateDraw(store db.TournamentStore, roundID string) error {
-	// 1. Get round info
-	round, err := store.GetRound(roundID)
-	if err != nil {
-		return fmt.Errorf("round not found: %w", err)
-	}
-	seq := round.Seq
-
-	// 2. Resolve side configuration from config (Sides as Data constraint)
-	sidesStr, err := store.GetSidesConfig()
-	if err != nil {
-		if err == sql.ErrNoRows {
-			// Default to 4-team BP style
-			sidesStr = "OG,OO,CG,CO"
-		} else {
-			return fmt.Errorf("failed to read sides configuration: %w", err)
+// selectChair picks the best unused adjudicator for a debate: adjudicators with
+// hard conflicts (declared or institutional) are skipped; remaining candidates
+// are ranked by fewest soft conflicts, then by score descending.
+func selectChair(adjudicators []models.AdjDrawInfo, usedAdjs map[string]bool, cIdx *ConflictIndex, teamInstMap map[string]string, teams []models.TeamAssignment) string {
+	var candidates []models.AdjDrawInfo
+	for _, adj := range adjudicators {
+		if usedAdjs[adj.ID] {
+			continue
 		}
+		if cIdx.adjHasHard(adj, teamInstMap, teams) {
+			continue
+		}
+		candidates = append(candidates, adj)
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return cIdx.adjSoftCount(candidates[i], teamInstMap, teams) < cIdx.adjSoftCount(candidates[j], teamInstMap, teams)
+	})
+	return candidates[0].ID
+}
+
+// resolveSides reads the side configuration from tournament config (Sides as
+// Data constraint), defaulting to BP-style sides when unset.
+func resolveSides(store db.TournamentStore) ([]string, int, error) {
+	sidesStr, err := store.GetSidesConfig()
+	if err == sql.ErrNoRows {
+		sidesStr = "OG,OO,CG,CO"
+	} else if err != nil {
+		return nil, 0, fmt.Errorf("failed to read sides configuration: %w", err)
 	}
 	sides := strings.Split(sidesStr, ",")
-	numSides := len(sides)
+	return sides, len(sides), nil
+}
 
-	// 3. Fetch all teams
-	teamsDraw, err := store.GetTeamsForDraw()
+// assignSides assigns the sides of one pairing via the Hungarian algorithm,
+// minimizing repeated side history across prior rounds.
+func assignSides(pair []models.TeamDrawInfo, sides []string, history map[models.SideHistKey]int) []models.TeamAssignment {
+	costMatrix := make([][]int, len(pair))
+	for i := range costMatrix {
+		costMatrix[i] = make([]int, len(sides))
+		for j := range sides {
+			costMatrix[i][j] = history[models.SideHistKey{TeamID: pair[i].ID, Side: sides[j]}]
+		}
+	}
+
+	assignment := SolveHungarian(costMatrix)
+	teams := make([]models.TeamAssignment, 0, len(pair))
+	for teamIdx, sideIdx := range assignment {
+		teams = append(teams, models.TeamAssignment{TeamID: pair[teamIdx].ID, Side: sides[sideIdx]})
+	}
+	return teams
+}
+
+// buildDebates converts resolved pairings into savable debate inputs with
+// Hungarian-assigned sides and pull-up flags applied per team.
+func buildDebates(pairings [][]models.TeamDrawInfo, pullFlags [][]bool, sides []string, history map[models.SideHistKey]int) []models.DebateDrawInput {
+	out := make([]models.DebateDrawInput, 0, len(pairings))
+	for debateIdx, pair := range pairings {
+		teams := assignSides(pair, sides, history)
+		for i := range teams {
+			teams[i].PullUp = pullFlags[debateIdx][i]
+		}
+		out = append(out, models.DebateDrawInput{
+			DebateID: uuid.New().String(),
+			Venue:    fmt.Sprintf("Room %d", debateIdx+1),
+			Teams:    teams,
+		})
+	}
+	return out
+}
+
+// drawContext bundles everything the draw pipeline needs for one round.
+type drawContext struct {
+	seq             int
+	roundOne        bool
+	sides           []string
+	numSides        int
+	active          []models.TeamDrawInfo
+	points          map[string]int
+	cIdx            *ConflictIndex
+	teamInstMap     map[string]string
+	unavailableAdjs map[string]bool
+	rnd             *rand.Rand
+}
+
+// loadUnavailableSets reads the round's availability overrides and returns the
+// IDs of unavailable teams and adjudicators. An empty override list means no
+// availability tracking is in effect for the round.
+func loadUnavailableSets(store db.TournamentStore, roundID string) (teams map[string]bool, adjs map[string]bool, err error) {
+	overrides, err := store.GetRoundAvailability(roundID)
 	if err != nil {
-		return fmt.Errorf("failed to query teams: %w", err)
+		return nil, nil, fmt.Errorf("failed to query round availability: %w", err)
+	}
+	teams = make(map[string]bool)
+	adjs = make(map[string]bool)
+	for _, o := range overrides {
+		if o.IsAvailable {
+			continue
+		}
+		switch o.EntityType {
+		case "team":
+			teams[o.EntityID] = true
+		case "adjudicator":
+			adjs[o.EntityID] = true
+		}
+	}
+	return teams, adjs, nil
+}
+
+// prepareDrawContext loads the round, resolves sides and points, applies the
+// standby admission rules, and indexes conflicts for pairing.
+func prepareDrawContext(store db.TournamentStore, roundID string) (*drawContext, error) {
+	round, err := store.GetRound(roundID)
+	if err != nil {
+		return nil, fmt.Errorf("round not found: %w", err)
+	}
+	sides, numSides, err := resolveSides(store)
+	if err != nil {
+		return nil, err
 	}
 
-	if len(teamsDraw) == 0 {
-		return fmt.Errorf("no teams registered in the tournament")
+	teams, err := store.GetTeamsForDraw()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query teams: %w", err)
 	}
-	if len(teamsDraw)%numSides != 0 {
-		return fmt.Errorf("number of teams (%d) is not a multiple of number of sides (%d)", len(teamsDraw), numSides)
+	if len(teams) == 0 {
+		return nil, fmt.Errorf("no teams registered in the tournament")
+	}
+
+	unavailableTeams, unavailableAdjs, err := loadUnavailableSets(store, roundID)
+	if err != nil {
+		return nil, err
+	}
+	if len(unavailableTeams) > 0 {
+		available := make([]models.TeamDrawInfo, 0, len(teams))
+		for _, t := range teams {
+			if !unavailableTeams[t.ID] {
+				available = append(available, t)
+			}
+		}
+		teams = available
+	}
+
+	points, err := store.GetConfirmedPoints()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query team points: %w", err)
+	}
+	for _, t := range teams {
+		if _, ok := points[t.ID]; !ok {
+			points[t.ID] = 0
+		}
+	}
+
+	conflicts, err := store.GetConflictsForDraw()
+	if err != nil {
+		return nil, fmt.Errorf("failed to query conflicts: %w", err)
 	}
 
 	teamInstMap := make(map[string]string)
-	for _, t := range teamsDraw {
+	for _, t := range teams {
 		if t.InstitutionID != "" {
 			teamInstMap[t.ID] = t.InstitutionID
 		}
 	}
 
-	numDebates := len(teamsDraw) / numSides
+	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+	sortByPoints(teams, points, rnd)
 
-	// 4. Group teams into pairings
-	var pairings [][]models.TeamDrawInfo
-	rSource := rand.New(rand.NewSource(time.Now().UnixNano()))
+	return &drawContext{
+		seq:             round.Seq,
+		roundOne:        round.Seq == 1,
+		sides:           sides,
+		numSides:        numSides,
+		active:          SelectActiveTeams(teams, numSides),
+		points:          points,
+		cIdx:            BuildConflictIndex(conflicts),
+		teamInstMap:     teamInstMap,
+		unavailableAdjs: unavailableAdjs,
+		rnd:             rnd,
+	}, nil
+}
 
-	if seq == 1 {
-		// Round 1: Randomize and pair
-		shuffled := make([]models.TeamDrawInfo, len(teamsDraw))
-		copy(shuffled, teamsDraw)
-		rSource.Shuffle(len(shuffled), func(i, j int) {
-			shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
-		})
-
-		for i := 0; i < numDebates; i++ {
-			pairings = append(pairings, shuffled[i*numSides:(i+1)*numSides])
-		}
-	} else {
-		// Power Pairing: Group teams by cumulative wins/points
-		teamPoints, err := store.GetConfirmedPoints()
-		if err != nil {
-			return fmt.Errorf("failed to query team points: %w", err)
-		}
-
-		// Fill in zero points for teams without any ballot results yet
-		for _, t := range teamsDraw {
-			if _, ok := teamPoints[t.ID]; !ok {
-				teamPoints[t.ID] = 0
-			}
-		}
-
-		// Sort teams by points
-		sort.Slice(teamsDraw, func(i, j int) bool {
-			if teamPoints[teamsDraw[i].ID] == teamPoints[teamsDraw[j].ID] {
-				return rSource.Float64() < 0.5 // Random tie break
-			}
-			return teamPoints[teamsDraw[i].ID] > teamPoints[teamsDraw[j].ID]
-		})
-
-		for i := 0; i < numDebates; i++ {
-			pairings = append(pairings, teamsDraw[i*numSides:(i+1)*numSides])
-		}
+// GenerateDraw runs bracket formation (with standby admission and surplus
+// sit-outs), conflict resolution, side balancing, pull-up detection, and
+// strength-balanced panel allocation for a round.
+func GenerateDraw(store db.TournamentStore, roundID string) error {
+	ctx, err := prepareDrawContext(store, roundID)
+	if err != nil {
+		return err
 	}
 
-	// 5. Assign sides within each pairing using the Hungarian Algorithm
-	history, err := store.GetSideHistory(seq)
+	pairings := buildPairings(ctx.active, ctx.numSides, ctx.roundOne, ctx.rnd)
+	resolveTeamPairConflicts(pairings, ctx.cIdx, 3)
+	pullFlags := DetectPullUps(pairings, ctx.points, !ctx.roundOne)
+
+	history, err := store.GetSideHistory(ctx.seq)
 	if err != nil {
 		return fmt.Errorf("failed to query side history: %w", err)
 	}
+	debatesToSave := buildDebates(pairings, pullFlags, ctx.sides, history)
 
-	var debatesToSave []models.DebateDrawInput
-
-	for debateIdx, pair := range pairings {
-		// Construct cost matrix (N x N where N = numSides)
-		costMatrix := make([][]int, numSides)
-		for i := 0; i < numSides; i++ {
-			costMatrix[i] = make([]int, numSides)
-			for j := 0; j < numSides; j++ {
-				// Cost is the number of times this team has played this side
-				costMatrix[i][j] = history[models.SideHistKey{TeamID: pair[i].ID, Side: sides[j]}]
-			}
-		}
-
-		// Solve assignment problem
-		assignment := SolveHungarian(costMatrix)
-
-		// Save debate record
-		debateID := uuid.New().String()
-		venue := fmt.Sprintf("Room %d", debateIdx+1)
-
-		var debateTeams []models.TeamAssignment
-		// Save debate team assignments
-		for teamIdx, sideIdx := range assignment {
-			debateTeams = append(debateTeams, models.TeamAssignment{
-				TeamID: pair[teamIdx].ID,
-				Side:   sides[sideIdx],
-			})
-		}
-
-		debatesToSave = append(debatesToSave, models.DebateDrawInput{
-			DebateID:     debateID,
-			Venue:        venue,
-			Teams:        debateTeams,
-			Adjudicators: []models.AdjudicatorAssignment{},
-		})
-	}
-
-	// 6. Adjudicator Allocation
 	adjudicators, err := store.GetAdjudicatorsForDraw()
 	if err != nil {
 		return fmt.Errorf("failed to query adjudicators: %w", err)
 	}
-
-	// Sort adjudicators by score descending (greedy panels placement)
+	if len(ctx.unavailableAdjs) > 0 {
+		available := make([]models.AdjDrawInfo, 0, len(adjudicators))
+		for _, a := range adjudicators {
+			if !ctx.unavailableAdjs[a.ID] {
+				available = append(available, a)
+			}
+		}
+		adjudicators = available
+	}
 	sort.Slice(adjudicators, func(i, j int) bool {
 		return adjudicators[i].Score > adjudicators[j].Score
 	})
 
-	// Allocate chairs first, keeping clash avoidance in mind
-	usedAdjs := make(map[string]bool)
+	order := debateImportanceOrder(debatesToSave, ctx.points, ctx.roundOne, ctx.rnd)
+	AllocatePanels(order, debatesToSave, adjudicators, ctx.cIdx, ctx.teamInstMap)
 
-	for idx := range debatesToSave {
-		d := &debatesToSave[idx]
-
-		// Allocate a conflict-free chair
-		var chairID string
-		for _, adj := range adjudicators {
-			if usedAdjs[adj.ID] {
-				continue
-			}
-
-			// Conflict Check: Adjudicator institution matches any team's institution in this debate
-			hasConflict := false
-			for _, t := range d.Teams {
-				teamInst := teamInstMap[t.TeamID]
-				if adj.InstitutionID != "" && teamInst != "" && adj.InstitutionID == teamInst {
-					hasConflict = true
-					break
-				}
-			}
-
-			if !hasConflict {
-				chairID = adj.ID
-				usedAdjs[adj.ID] = true
-				break
-			}
-		}
-
-		if chairID != "" {
-			d.Adjudicators = append(d.Adjudicators, models.AdjudicatorAssignment{
-				AdjudicatorID: chairID,
-				Role:          "chair",
-			})
-		}
-	}
-
-	// 7. Save draw in store
-	err = store.SaveDraw(roundID, debatesToSave)
-	if err != nil {
+	if err := store.SaveDraw(roundID, debatesToSave); err != nil {
 		return fmt.Errorf("failed to save draw: %w", err)
 	}
-
 	return nil
 }

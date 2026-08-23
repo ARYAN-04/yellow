@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"GoTabs/internal/models"
+	"yellow/internal/models"
 
 	"github.com/google/uuid"
 )

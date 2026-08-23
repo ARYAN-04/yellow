@@ -8,8 +8,8 @@ import (
 	"regexp"
 	"strings"
 
-	"GoTabs/internal/db"
-	"GoTabs/internal/models"
+	"yellow/internal/db"
+	"yellow/internal/models"
 )
 
 // API encapsulates the dependencies for HTTP JSON API endpoints.

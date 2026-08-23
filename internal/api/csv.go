@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"GoTabs/internal/models"
+	"yellow/internal/models"
 )
 
 // ImportInstitutions handles CSV uploads to insert institutions in bulk.

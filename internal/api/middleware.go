@@ -3,8 +3,8 @@ package api
 import (
 	"net/http"
 
-	"GoTabs/internal/db"
-	"GoTabs/internal/models"
+	"yellow/internal/db"
+	"yellow/internal/models"
 )
 
 // IsAdmin checks if the incoming request is authorized as organizer/admin.

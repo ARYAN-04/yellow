@@ -3,11 +3,15 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
-	"GoTabs/internal/draw"
-	"GoTabs/internal/models"
+	"yellow/internal/db"
+	"yellow/internal/draw"
+	"yellow/internal/models"
 
 	"github.com/google/uuid"
 )
@@ -473,7 +477,60 @@ func (api *API) GetRoundDraw(w http.ResponseWriter, r *http.Request) {
 type SubmitBallotRequest struct {
 	SubmitterType string                    `json:"submitter_type"`
 	SubmitterID   string                    `json:"submitter_id"`
+	IsSplit       bool                      `json:"is_split"`
+	EntryGroup    string                    `json:"entry_group"`
 	Results       []models.TeamBallotResult `json:"results"`
+}
+
+// validateBallotRequest enforces score scale and split/consensus rules on a ballot payload.
+func validateBallotRequest(req *SubmitBallotRequest, scoreMin, scoreMax float64) error {
+	if len(req.Results) == 0 {
+		return errors.New("results are required")
+	}
+	seen := make(map[string]bool)
+	for _, res := range req.Results {
+		if res.Points < 0 {
+			return errors.New("points must be >= 0")
+		}
+		if res.SpeakerPoints < scoreMin || res.SpeakerPoints > scoreMax {
+			return fmt.Errorf("speaker score %s out of range [%s,%s]",
+				strconv.FormatFloat(res.SpeakerPoints, 'f', -1, 64),
+				strconv.FormatFloat(scoreMin, 'f', -1, 64),
+				strconv.FormatFloat(scoreMax, 'f', -1, 64))
+		}
+		hasAdj := res.AdjudicatorID != nil && *res.AdjudicatorID != ""
+		if !req.IsSplit && hasAdj {
+			return errors.New("consensus ballots must not specify adjudicator_id on results")
+		}
+		if req.IsSplit && !hasAdj {
+			return errors.New("split ballots require adjudicator_id on every result")
+		}
+		adj := ""
+		if hasAdj {
+			adj = *res.AdjudicatorID
+		}
+		key := res.TeamID + "|" + adj
+		if seen[key] {
+			return errors.New("each adjudicator may appear at most once per team")
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func ballotScoreBounds(tdb db.TournamentStore) (float64, float64) {
+	scoreMin, scoreMax := 0.0, 100.0
+	if v, err := tdb.GetConfig("score_min"); err == nil {
+		if f, perr := strconv.ParseFloat(v, 64); perr == nil {
+			scoreMin = f
+		}
+	}
+	if v, err := tdb.GetConfig("score_max"); err == nil {
+		if f, perr := strconv.ParseFloat(v, 64); perr == nil {
+			scoreMax = f
+		}
+	}
+	return scoreMin, scoreMax
 }
 
 // SubmitBallot records ballot results for a debate.
@@ -492,8 +549,14 @@ func (api *API) SubmitBallot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	scoreMin, scoreMax := ballotScoreBounds(tdb)
+	if verr := validateBallotRequest(&req, scoreMin, scoreMax); verr != nil {
+		JSONError(w, verr.Error(), http.StatusBadRequest)
+		return
+	}
+
 	ballotID := uuid.New().String()
-	err = tdb.SubmitBallot(debateID, ballotID, req.SubmitterType, req.SubmitterID, "submitted", req.Results)
+	err = tdb.SubmitBallot(debateID, ballotID, req.SubmitterType, req.SubmitterID, "submitted", req.IsSplit, req.EntryGroup, req.Results)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			JSONError(w, "debate not found", http.StatusNotFound)
@@ -507,6 +570,8 @@ func (api *API) SubmitBallot(w http.ResponseWriter, r *http.Request) {
 }
 
 // ConfirmBallot transitions a ballot's status to 'confirmed', incorporating it into standings.
+// For double-entry ballots the sibling draft is compared first: a match confirms both,
+// a mismatch flags both as 'discrepancy' and returns the diffs.
 func (api *API) ConfirmBallot(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
 	ballotID := r.PathValue("ballot_id")
@@ -521,8 +586,12 @@ func (api *API) ConfirmBallot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = tdb.ConfirmBallot(ballotID)
+	err = confirmWithDoubleEntry(tdb, ballotID)
 	if err != nil {
+		if dispErr, ok := err.(*DiscrepancyError); ok {
+			JSONResponse(w, map[string]interface{}{"error": "discrepancy", "diffs": dispErr.Diffs}, http.StatusConflict)
+			return
+		}
 		if err == sql.ErrNoRows {
 			JSONError(w, "ballot not found", http.StatusNotFound)
 		} else {
@@ -534,6 +603,69 @@ func (api *API) ConfirmBallot(w http.ResponseWriter, r *http.Request) {
 	JSONResponse(w, map[string]string{"id": ballotID, "status": "confirmed"}, http.StatusOK)
 }
 
+// DiscrepancyError signals mismatched double-entry ballots along with their field diffs.
+type DiscrepancyError struct {
+	Diffs []models.BallotDiff
+}
+
+func (e *DiscrepancyError) Error() string { return "double-entry ballots do not match" }
+
+// confirmWithDoubleEntry runs the double-entry comparison flow for a ballot confirmation.
+func confirmWithDoubleEntry(tdb db.TournamentStore, ballotID string) error {
+	ballot, err := tdb.GetBallotByID(ballotID)
+	if err != nil {
+		return err
+	}
+
+	if ballot.EntryGroup == nil || *ballot.EntryGroup == "" {
+		return tdb.ConfirmBallot(ballotID)
+	}
+
+	pending, _, _, err := tdb.CompareEntryGroup(*ballot.EntryGroup)
+	if err != nil {
+		return err
+	}
+	if len(pending) < 2 {
+		return tdb.ConfirmBallot(ballotID)
+	}
+
+	diffs := db.CompareBallotSummaries(pending[0], pending[1])
+	if len(diffs) > 0 {
+		for _, b := range pending {
+			if serr := tdb.SetBallotStatus(b.ID, "discrepancy"); serr != nil {
+				return serr
+			}
+		}
+		return &DiscrepancyError{Diffs: diffs}
+	}
+
+	for _, b := range pending {
+		if serr := tdb.SetBallotStatus(b.ID, "confirmed"); serr != nil {
+			return serr
+		}
+	}
+	return nil
+}
+
+// GetRoundBallots returns the ballot registry for a round.
+func (api *API) GetRoundBallots(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	roundID := r.PathValue("round_id")
+	tdb, err := api.DBMgr.Get(slug)
+	if err != nil {
+		JSONError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	results, err := tdb.GetBallotsForRound(roundID)
+	if err != nil {
+		JSONError(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	JSONResponse(w, results, http.StatusOK)
+}
+
 // GetStandings dynamically computes team rankings based on confirmed ballots.
 func (api *API) GetStandings(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
@@ -543,7 +675,17 @@ func (api *API) GetStandings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	list, err := tdb.GetStandings()
+	var precedence []string
+	if p := strings.TrimSpace(r.URL.Query().Get("precedence")); p != "" {
+		precedence = strings.Split(p, ",")
+	} else if v, cerr := tdb.GetConfig("ranking_precedence"); cerr == nil {
+		_ = json.Unmarshal([]byte(v), &precedence)
+	}
+
+	category := strings.TrimSpace(r.URL.Query().Get("category"))
+
+	// Non-admin viewers must not infer results of silent, unreleased rounds.
+	list, err := tdb.GetStandingsWithPrecedenceEx(precedence, category, api.IsAdmin(r))
 	if err != nil {
 		JSONError(w, "failed to compute standings: "+err.Error(), http.StatusInternalServerError)
 		return
