@@ -57,12 +57,11 @@ func DetectPullUps(pairings [][]models.TeamDrawInfo, points map[string]int, powe
 
 // sortByPoints orders teams by confirmed points descending with random tiebreak.
 func sortByPoints(teams []models.TeamDrawInfo, points map[string]int, r *rand.Rand) {
-	sort.Slice(teams, func(i, j int) bool {
-		pi, pj := points[teams[i].ID], points[teams[j].ID]
-		if pi == pj {
-			return r.Float64() < 0.5
-		}
-		return pi > pj
+	r.Shuffle(len(teams), func(i, j int) {
+		teams[i], teams[j] = teams[j], teams[i]
+	})
+	sort.SliceStable(teams, func(i, j int) bool {
+		return points[teams[i].ID] > points[teams[j].ID]
 	})
 }
 

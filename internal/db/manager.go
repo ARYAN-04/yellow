@@ -68,6 +68,7 @@ func (m *ConnectionManager) Get(slug string) (TournamentStore, error) {
 			return nil, fmt.Errorf("failed to open read-only database: %w", err)
 		}
 		newDB.SetMaxOpenConns(1)
+		_, _ = newDB.Exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
 	} else {
 		newDB, err = InitTournamentDB(dbPath)
 		if err != nil {

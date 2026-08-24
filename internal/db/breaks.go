@@ -248,8 +248,7 @@ func (s *SQLTournamentStore) GenerateBracket(roundID, categoryID string) error {
 	if len(seeds) < 2 {
 		return fmt.Errorf("not enough qualifiers to generate a bracket")
 	}
-	s.SaveDraw(roundID, buildKnockoutDebates(seeds, s.knockoutSides()))
-	return nil
+	return s.SaveDraw(roundID, buildKnockoutDebates(seeds, s.knockoutSides()))
 }
 
 type debateScore struct {
@@ -385,16 +384,22 @@ func (s *SQLTournamentStore) AdvanceEliminationRound(roundID string) (string, er
 		teamID string
 		seed   int
 	}
-	n := len(debates) * 2
 	winners := make([]winner, 0, len(debates))
 	for _, d := range debates {
 		w, decided := pickWinner(scores[d.id], d.teamIDs)
 		if !decided {
 			return "", fmt.Errorf("debate in %q has no confirmed result yet", d.venue)
 		}
-		seed := d.pos
-		if len(d.teamIDs) > 1 && w == d.teamIDs[1] {
-			seed = n + 1 - d.pos
+		var rank sql.NullInt64
+		_ = s.db.QueryRow("SELECT rank FROM break_qualifiers WHERE team_id = ? ORDER BY rank ASC LIMIT 1", w).Scan(&rank)
+		seed := 9999
+		if rank.Valid {
+			seed = int(rank.Int64)
+		} else {
+			seed = d.pos
+			if len(d.teamIDs) > 1 && w == d.teamIDs[1] {
+				seed = len(debates)*2 + 1 - d.pos
+			}
 		}
 		winners = append(winners, winner{teamID: w, seed: seed})
 	}
@@ -467,7 +472,14 @@ func (s *SQLTournamentStore) loadBracketDebates(br *models.BracketRound) error {
 		return err
 	}
 
-	nameRows, err := s.db.Query("SELECT dt.debate_id, dt.team_id, t.name, dt.side FROM debate_teams dt JOIN teams t ON dt.team_id = t.id ORDER BY dt.rowid")
+	nameRows, err := s.db.Query(`
+		SELECT dt.debate_id, dt.team_id, t.name, dt.side
+		FROM debate_teams dt
+		JOIN teams t ON dt.team_id = t.id
+		JOIN debates d ON dt.debate_id = d.id
+		WHERE d.round_id = ?
+		ORDER BY dt.rowid
+	`, br.ID)
 	if err != nil {
 		return err
 	}

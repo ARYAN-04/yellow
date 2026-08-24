@@ -50,6 +50,8 @@ export default function Checkins() {
     load();
   }, [slug]);
 
+  const [search, setSearch] = useState('');
+
   const toggle = async (row: CheckinRow) => {
     try {
       await fetchAPI(`/api/t/${slug}/checkins/${row.entity_type}/${row.entity_id}`, 'POST', { checked_in: !row.checked_in });
@@ -57,13 +59,33 @@ export default function Checkins() {
     } catch (err: any) { alert(err.message); }
   };
 
-  const visible = rows.filter(r => r.entity_type === filter);
+  const handleBulkCheckin = async (checkedIn: boolean) => {
+    const targets = visible.filter(r => r.checked_in !== checkedIn);
+    if (targets.length === 0) return;
+    try {
+      await Promise.all(
+        targets.map(r =>
+          fetchAPI(`/api/t/${slug}/checkins/${r.entity_type}/${r.entity_id}`, 'POST', { checked_in: checkedIn })
+        )
+      );
+      load();
+    } catch (err: any) {
+      alert("Bulk check-in failed: " + err.message);
+    }
+  };
+
+  const visible = rows
+    .filter(r => r.entity_type === filter)
+    .filter(r => !search || r.entity_name.toLowerCase().includes(search.toLowerCase()));
+
+  const totalCurrent = rows.filter(r => r.entity_type === filter).length;
+  const checkedInCount = rows.filter(r => r.entity_type === filter && r.checked_in).length;
 
   return (
     <div>
-      <h2>Check-ins</h2>
+      <h2>Check-ins &amp; Attendance</h2>
       <p style={{ color: 'var(--text-mute)', fontSize: '0.85rem', marginTop: '-0.5rem' }}>
-        Each team and adjudicator has a personal QR code. Scanning it opens a self-service check-in page; availability for rounds can be synced from these check-ins.
+        Manage participant attendance directly or provide self-service QR codes. Round availability can be synced from these records.
       </p>
 
       <div className="tabs" style={{ marginBottom: '1rem' }}>
@@ -76,7 +98,50 @@ export default function Checkins() {
       </div>
 
       <div className="card" style={{ maxWidth: '860px' }}>
-        <h3><QrCode size={16} style={{ verticalAlign: '-2px' }} /> {filter === 'team' ? 'Teams' : 'Adjudicators'}</h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+          <div>
+            <h3 style={{ margin: 0 }}>
+              <QrCode size={16} style={{ verticalAlign: '-2px' }} /> {filter === 'team' ? 'Teams' : 'Adjudicators'}
+            </h3>
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-mute)' }}>
+              {checkedInCount} / {totalCurrent} checked in
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <input
+              type="text"
+              className="input"
+              placeholder={`Search ${filter}s...`}
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              style={{ width: '180px', padding: '4px 8px', fontSize: '0.8rem' }}
+            />
+            {!isReadOnly && (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ padding: '4px 10px', fontSize: '0.78rem' }}
+                  onClick={() => handleBulkCheckin(true)}
+                  disabled={checkedInCount === totalCurrent}
+                >
+                  Check In All
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ padding: '4px 10px', fontSize: '0.78rem' }}
+                  onClick={() => handleBulkCheckin(false)}
+                  disabled={checkedInCount === 0}
+                >
+                  Undo All
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
         <div style={{ maxHeight: '520px', overflowY: 'auto' }}>
           {visible.map(row => (
             <div key={`${row.entity_type}:${row.entity_id}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.65rem 0', borderBottom: '1px solid var(--border)' }}>
@@ -100,7 +165,9 @@ export default function Checkins() {
             </div>
           ))}
           {visible.length === 0 && (
-            <div style={{ padding: '2rem 0', color: 'var(--text-mute)', textAlign: 'center' }}>Nothing to check in yet.</div>
+            <div style={{ padding: '2rem 0', color: 'var(--text-mute)', textAlign: 'center' }}>
+              {search ? 'No matches found.' : 'Nothing to check in yet.'}
+            </div>
           )}
         </div>
       </div>

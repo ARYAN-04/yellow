@@ -80,18 +80,21 @@ func AllocatePanels(order []int, debates []models.DebateDrawInput, adjs []models
 
 	split := len(rest) - len(rest)/traineeDivisor
 	panelSlots := distributeSnake(adjIDs(rest[:split]), n, func(slot int, id string) bool {
-		return !cIdx.adjHasHard(byID[id], teamInstMap, debates[slot].Teams)
+		di := order[slot]
+		return !cIdx.adjHasHard(byID[id], teamInstMap, debates[di].Teams)
 	})
 	traineeSlots := distributeSnake(adjIDs(rest[split:]), n, func(slot int, id string) bool {
-		return !cIdx.adjHasHard(byID[id], teamInstMap, debates[slot].Teams)
+		di := order[slot]
+		return !cIdx.adjHasHard(byID[id], teamInstMap, debates[di].Teams)
 	})
 
-	for di := 0; di < n; di++ {
-		for _, id := range panelSlots[di] {
+	for slot := 0; slot < n; slot++ {
+		di := order[slot]
+		for _, id := range panelSlots[slot] {
 			debates[di].Adjudicators = append(debates[di].Adjudicators,
 				models.AdjudicatorAssignment{AdjudicatorID: id, Role: "panel"})
 		}
-		for _, id := range traineeSlots[di] {
+		for _, id := range traineeSlots[slot] {
 			debates[di].Adjudicators = append(debates[di].Adjudicators,
 				models.AdjudicatorAssignment{AdjudicatorID: id, Role: "trainee"})
 		}

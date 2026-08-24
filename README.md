@@ -1,74 +1,94 @@
 # Yellow (Tabbycat-Go)
 
-Yellow is a tournament tab software rebuild in Go, utilizing a per-tournament SQLite database architecture, a pure Go build pipeline (no CGO dependencies), and a modern React client SPA compiled directly into the executable binary.
+Yellow is a modern rebuild of the Tabbycat tournament tab software in Go, utilizing a per-tournament SQLite database architecture, a pure Go build pipeline (zero CGO toolchain requirements), and a React SPA compiled directly into a single static binary.
 
 ---
 
-## 1. Project Overview & Architecture
+## 1. Architecture & Key Design Choices
 
-* **Database Engine:** Pure Go SQLite driver (`modernc.org/sqlite`). Connection pooling enforces a single-writer constraint (`SetMaxOpenConns(1)`) to eliminate `SQLITE_BUSY` contention.
-* **Backend Router:** Standard Go 1.22+ `http.ServeMux` routing pattern.
-* **Frontend Shell:** React (Vite + TS + Tailwind CSS) client. Assets compile to `web/dist` and are embedded directly into the Go executable via `go:embed` inside `internal/embed/dist`.
-* **Tenant Isolation:** Every tournament's settings, schemas, records, and access tokens live within its own SQLite file (`tournaments/<slug>.db`).
-* **Visual Theme:** Light-monochrome theme with zinc-colored backdrops and cards, responsive layouts, and modal workflows.
-
----
-
-## 2. What Has Been Completed
-
-### Phase 0: Scaffolding & Dynamic DB Manager
-* Platform database `tournaments/global.db` tracks tournament registries and archives.
-* Connection manager [internal/db/manager.go](internal/db/manager.go) loads SQLite files dynamically, enforcing read-only modes if flagged.
-
-### Phase 1: Tournament Operations & REST APIs
-* REST handlers for Institutions, Teams, Speakers, Adjudicators, and Rounds in [internal/api/tournament.go](internal/api/tournament.go).
-* Bulk CSV upload parsers in [internal/api/csv.go](internal/api/csv.go).
-* Kuhn-Munkres (Hungarian algorithm) side position balance solver and power-pairing matchmaking draws in [internal/draw/](internal/draw/).
-* Token-resolved participant and adjudicator route schedules in [internal/api/token.go](internal/api/token.go) and [web/src/App.tsx](web/src/App.tsx).
-
-### Phase 2: Archive & Read-Only Locks
-* Upload parser for ingested database archives in [internal/api/archive.go](internal/api/archive.go).
-* Write blocker middleware intercepting mutating queries (`POST`, `PUT`, `DELETE`) on archived paths returning `403 Forbidden`.
-
-### Final UI Adjustments (Round Controls & Standings)
-* Added round configuration toggles (Draw Released, Silent Round, Results Released) synced via `PUT /api/t/{slug}/rounds/{round_id}`.
-* Added participant standings card displaying ranking and scores on `/p/:token`.
-* Null-safety JSON serialization guards returning `[]` instead of `nil` for empty states.
+* **Pure Go SQLite Engine:** Uses `modernc.org/sqlite` with strict single-writer discipline (`SetMaxOpenConns(1)`), `PRAGMA foreign_keys = ON;`, `PRAGMA journal_mode = WAL;`, and `PRAGMA busy_timeout = 5000;`.
+* **Standard Library HTTP Routing:** Native Go 1.22+ `http.ServeMux` routing with route-level admin authorization and write blocking.
+* **Single-Binary Distribution:** React frontend (Vite + TypeScript + Tailwind CSS design system) compiled to `web/dist` and embedded directly into the Go server executable via `go:embed` inside `internal/embed/dist`.
+* **Tenant & Data Isolation:** Every tournament is self-describing; its schema, settings, round records, ballots, feedback, and access tokens live within its own SQLite file (`tournaments/<slug>.db`).
+* **Participant Portals:** Unguessable UUID/random tokens provide secure, role-scoped participant and adjudicator dashboards.
 
 ---
 
-## 3. What Needs to Be Done (Next Steps)
+## 2. Feature Matrix
 
-### 1. Organizer Endpoint Authorization Middleware (High Priority)
-* Currently, tournament admin REST endpoints (e.g., `/api/t/{slug}/institutions` POST/DELETE) do not validate whether the organizer is logged in. They rely purely on frontend password gating.
-* **Task:** Implement an auth middleware in Go that inspects the `admin_session` cookie and wraps all tournament admin/writer routes.
+### Setup & Organization
+* **Hierarchy & Divisions:** Institutions, Teams, Speakers, and Adjudicators with Novice, ESL, and EFL division flags.
+* **Break Categories:** Configurable break categories with custom size thresholds, base point cutoffs, and eligibility rules.
+* **Custom Score Scales & Precedence:** Configurable speaker score bounds (`score_min`, `score_max`) and multi-tier ranking precedence (e.g. `["points", "speaker_points", "margin"]`).
 
-### 2. Phase 3: Cloud Replication & OAuth2 Topology
-* **LiteFS/Litestream Sync:** Integrate backup/sync replication to ship SQLite tournament databases off to cloud buckets automatically.
-* **OAuth2 Authentication:** Set up Auth0, Google, or GitHub social logins for organizers instead of the hardcoded `"admin"` credentials.
-* **Topology Segregation:** Allow splitting the platform registry from the running tournaments to support distributed container instances.
+### Matchmaking & Panel Allocation
+* **Kuhn-Munkres (Hungarian) Side Balancing:** Deterministic positional history optimization across 2-sided and 4-sided debate formats.
+* **Power-Pairing & Pull-Ups:** Odd-bracket pull-up/pull-down pairing with standby team admission and surplus handling.
+* **Panels & Trainees:** Strength-balanced panel allocation tracking bracket importance (top debates receive highest-rated chairs and panelists) with lowest-quartile trainee distribution.
+* **Conflict (Clash) Engine:** Personal, institutional, and historical conflict registration with hard and soft weight penalties.
+* **Interactive Allocations Board:** Drag-and-drop team and adjudicator allocations board with real-time clash overlays.
+
+### Balloting & Verification
+* **Consensus & Split Ballots:** Support for consensus scoring and per-judge individual split ballots.
+* **Double-Entry Verification:** Two independent tab-room draft entries required to confirm, with automatic discrepancy diff highlighting on conflicts.
+* **Ballot Registry:** Live round ballot status dashboard tracking drafts, submissions, discrepancies, and confirmations.
+
+### Attendance & Check-ins
+* **Admin Dashboard Check-ins:** Direct check-in toggles, search filtering, attendance counters, and bulk "Check In All" / "Undo All" controls.
+* **Self-Service QR Check-ins:** Mobile-friendly QR code check-in URLs (`/checkin/<token>`).
+* **Round Availability Synchronization:** One-click attendance sync into round availability exclusions.
+
+### Feedback Engine
+* **Questionnaire Builder:** Dynamic question builder supporting numeric scale, text, checkbox, and select inputs with custom sequencing.
+* **Bidirectional Scoping:** Scoped evaluations (team→adjudicator, panelist→chair, chair→panelist).
+* **Dynamic Rating Recalculation:** Configurable test score and peer feedback weighting recalculating live judge ratings.
+
+### Elimination Brackets
+* **Break Calculation:** Automated qualifier ranking across open and novice categories with bubble detection.
+* **Knockout Bracket Visualizer:** Sequential tree visualizer (Octos, Quarters, Semis, Finals) with seeding-preserved advancement progression.
+
+### Archive & Read-Only Locks
+* **Write Blocker Middleware:** Automatically protects archived tournament records from modification (`POST`, `PUT`, `DELETE`).
+* **Archive Upload (`POST /api/archive/upload`):** Raw `.db` archive ingestion with automatic schema validation and connection eviction.
 
 ---
 
-## 4. Run & Development Instructions
+## 3. Running & Developing Yellow
 
-### Run the Compiled Static Application
+### Prerequisites
+* Go 1.22+
+* Node.js & `pnpm` (for frontend building)
+
+### Run the Standalone Server
 ```bash
-./server -port 8080
+# Start server with embedded frontend
+go run ./cmd/server -port 8080
 ```
-Then visit: `http://localhost:8080/`
+Then open: **[http://localhost:8080](http://localhost:8080)** (Admin password: `admin`)
 
-### Frontend Live Development Mode
-1. Run the Go server:
+### Run Automated Tests
+```bash
+# Execute the full Go test suite
+go test -v ./...
+```
+
+### Frontend Development Mode
+1. Start the Go backend API server:
    ```bash
-   ./server -port 8080
+   go run ./cmd/server -port 8080
    ```
-2. Navigate to the frontend directory:
+2. In a separate terminal, run the Vite development server:
    ```bash
    cd web
+   pnpm dev
    ```
-3. Start the Vite dev server:
-   ```bash
-   pnpm run dev
-   ```
-4. Access the hot-reloading client at `http://localhost:5173/`. All API calls are automatically proxied to the Go server on port 8080.
+3. Open `http://localhost:5173/` (requests to `/api` proxy automatically to port 8080).
+
+### Build for Production
+```bash
+# 1. Build frontend assets
+(cd web && pnpm build)
+
+# 2. Compile static Go binary
+go build -o yellow ./cmd/server
+```

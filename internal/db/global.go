@@ -43,6 +43,12 @@ func InitGlobalDB(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open global db: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+
+	if _, err := db.Exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to configure global db pragmas: %w", err)
+	}
 
 	if _, err := db.Exec(GlobalSchema); err != nil {
 		db.Close()

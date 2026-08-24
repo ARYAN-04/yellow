@@ -242,6 +242,11 @@ func InitTournamentDB(path string) (*sql.DB, error) {
 	// Single-writer discipline to prevent SQLITE_BUSY errors
 	db.SetMaxOpenConns(1)
 
+	if _, err := db.Exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to configure tournament db pragmas: %w", err)
+	}
+
 	if _, err := db.Exec(TournamentSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to apply tournament db schema: %w", err)

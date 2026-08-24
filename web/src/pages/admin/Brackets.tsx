@@ -113,7 +113,7 @@ export default function Brackets() {
     round.debates.length > 0 && round.debates.every((d: any) => d.winner_team_id);
 
   const tabs = [...baseTabs, ...categories.map((c: any) => ({ key: c.id, label: c.name }))];
-  const columns = [...rounds].reverse();
+  const columns = [...rounds].sort((a: any, b: any) => a.seq - b.seq);
 
   return (
     <div>

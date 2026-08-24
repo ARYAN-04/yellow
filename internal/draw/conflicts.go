@@ -130,15 +130,22 @@ func trySwap(pairings [][]models.TeamDrawInfo, ci *ConflictIndex, di, si, dj, sj
 	return false
 }
 
+func absInt(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // resolveTeamPairConflicts attempts to remove team-level conflicts by swapping
-// teams between debates. Hard conflicts are prioritized implicitly by cost:
+// teams between adjacent debates. Hard conflicts are prioritized implicitly by cost:
 // each accepted swap must reduce combined penalty. Unresolvable conflicts remain.
 func resolveTeamPairConflicts(pairings [][]models.TeamDrawInfo, ci *ConflictIndex, passes int) {
 	for p := 0; p < passes; p++ {
 		swappedAny := false
 		for di := range pairings {
 			for dj := range pairings {
-				if di == dj {
+				if di == dj || absInt(di-dj) > 1 {
 					continue
 				}
 				for si := range pairings[di] {

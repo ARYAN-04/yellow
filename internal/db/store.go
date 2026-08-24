@@ -206,7 +206,7 @@ func (s *SQLTournamentStore) ListTeams() ([]models.Team, error) {
 	defer rows.Close()
 
 	var list []models.Team
-	teamMap := make(map[string]*models.Team)
+	teamIndex := make(map[string]int)
 	for rows.Next() {
 		var t models.Team
 		var instID, instName, instCode sql.NullString
@@ -220,7 +220,7 @@ func (s *SQLTournamentStore) ListTeams() ([]models.Team, error) {
 		}
 		t.Speakers = []models.Speaker{}
 		list = append(list, t)
-		teamMap[t.ID] = &list[len(list)-1]
+		teamIndex[t.ID] = len(list) - 1
 	}
 
 	spRows, err := s.db.Query("SELECT id, name, team_id, is_novice, is_esl, is_efl FROM speakers")
@@ -235,8 +235,8 @@ func (s *SQLTournamentStore) ListTeams() ([]models.Team, error) {
 		if err := spRows.Scan(&sp.ID, &sp.Name, &teamID, &sp.IsNovice, &sp.IsEsl, &sp.IsEfl); err != nil {
 			return nil, err
 		}
-		if t, ok := teamMap[teamID]; ok {
-			t.Speakers = append(t.Speakers, sp)
+		if idx, ok := teamIndex[teamID]; ok {
+			list[idx].Speakers = append(list[idx].Speakers, sp)
 		}
 	}
 	return list, nil
@@ -614,37 +614,47 @@ func (s *SQLTournamentStore) GetRoundDraw(roundID string) ([]models.DebateDraw, 
 		SELECT dt.debate_id, dt.id, dt.team_id, t.name, dt.side, COALESCE(dt.pull_up, 0)
 		FROM debate_teams dt
 		JOIN teams t ON dt.team_id = t.id
-	`)
-	if err == nil {
-		for tRows.Next() {
-			var dID, tID, tName, side string
-			var assignmentID string
-			var pullUp bool
-			if err := tRows.Scan(&dID, &assignmentID, &tID, &tName, &side, &pullUp); err == nil {
-				if d, ok := debateMap[dID]; ok {
-					d.Teams = append(d.Teams, models.TeamAssignment{ID: assignmentID, TeamID: tID, TeamName: tName, Side: side, PullUp: pullUp})
-				}
-			}
+		JOIN debates d ON dt.debate_id = d.id
+		WHERE d.round_id = ?
+	`, roundID)
+	if err != nil {
+		return nil, err
+	}
+	defer tRows.Close()
+
+	for tRows.Next() {
+		var dID, tID, tName, side string
+		var assignmentID string
+		var pullUp bool
+		if err := tRows.Scan(&dID, &assignmentID, &tID, &tName, &side, &pullUp); err != nil {
+			return nil, err
 		}
-		tRows.Close()
+		if d, ok := debateMap[dID]; ok {
+			d.Teams = append(d.Teams, models.TeamAssignment{ID: assignmentID, TeamID: tID, TeamName: tName, Side: side, PullUp: pullUp})
+		}
 	}
 
 	aRows, err := s.db.Query(`
 		SELECT da.debate_id, da.id, da.adjudicator_id, a.name, da.role
 		FROM debate_adjudicators da
 		JOIN adjudicators a ON da.adjudicator_id = a.id
-	`)
-	if err == nil {
-		for aRows.Next() {
-			var dID, aID, aName, role string
-			var assignmentID string
-			if err := aRows.Scan(&dID, &assignmentID, &aID, &aName, &role); err == nil {
-				if d, ok := debateMap[dID]; ok {
-					d.Adjudicators = append(d.Adjudicators, models.AdjudicatorAssignment{ID: assignmentID, AdjudicatorID: aID, AdjudicatorName: aName, Role: role})
-				}
-			}
+		JOIN debates d ON da.debate_id = d.id
+		WHERE d.round_id = ?
+	`, roundID)
+	if err != nil {
+		return nil, err
+	}
+	defer aRows.Close()
+
+	for aRows.Next() {
+		var dID, aID, aName, role string
+		var assignmentID string
+		if err := aRows.Scan(&dID, &assignmentID, &aID, &aName, &role); err != nil {
+			return nil, err
 		}
-		aRows.Close()
+		if d, ok := debateMap[dID]; ok {
+			d.Adjudicators = append(d.Adjudicators, models.AdjudicatorAssignment{ID: assignmentID, AdjudicatorID: aID, AdjudicatorName: aName, Role: role})
+		}
 	}
 
 	return debates, nil
@@ -760,21 +770,33 @@ func (s *SQLTournamentStore) SaveDraw(roundID string, debates []models.DebateDra
 
 	var existingDebateIDs []string
 	rows, err := tx.Query("SELECT id FROM debates WHERE round_id = ?", roundID)
-	if err == nil {
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err == nil {
-				existingDebateIDs = append(existingDebateIDs, id)
-			}
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
 		}
-		rows.Close()
+		existingDebateIDs = append(existingDebateIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
 	}
 
 	for _, dID := range existingDebateIDs {
-		_, _ = tx.Exec("DELETE FROM debate_teams WHERE debate_id = ?", dID)
-		_, _ = tx.Exec("DELETE FROM debate_adjudicators WHERE debate_id = ?", dID)
+		if _, err := tx.Exec("DELETE FROM debate_teams WHERE debate_id = ?", dID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("DELETE FROM debate_adjudicators WHERE debate_id = ?", dID); err != nil {
+			return err
+		}
 	}
-	_, _ = tx.Exec("DELETE FROM debates WHERE round_id = ?", roundID)
+	if _, err := tx.Exec("DELETE FROM debates WHERE round_id = ?", roundID); err != nil {
+		return err
+	}
 
 	for _, d := range debates {
 		var posVal interface{}
@@ -1355,47 +1377,6 @@ func (s *SQLTournamentStore) GetRound(roundID string) (*models.Round, error) {
 	return &r, nil
 }
 
-func (s *SQLTournamentStore) GenerateRoundDraw(roundID string) error {
-	// We will implement GenerateRoundDraw algorithm calls directly here or link it to internal/draw.
-	// But to avoid circular dependency (db -> draw -> db), we can call the solver code or put draw generation here.
-	// Wait, is there a circular dependency?
-	// If internal/db/store.go references models, it does not import draw.
-	// We can import internal/draw/hungarian solver, and implement GenerateRoundDraw inside internal/db/store.go.
-	// Wait, let's look at the draw generation algorithm in internal/draw/pair.go.
-	// If we move the database-independent part to internal/draw/pair.go, then draw.GenerateDraw can take TournamentStore!
-	// Wait, if internal/draw imports models and db (to use TournamentStore), and internal/db imports models, there is NO circular dependency!
-	// Let's trace it:
-	// db: does not import draw.
-	// draw: imports db (to use db.TournamentStore) and models.
-	// api: imports db, draw, models.
-	// This is completely acyclic and clean!
-	// Yes! So the actual GenerateRoundDraw method on SQLTournamentStore can just call `draw.GenerateDraw(s, roundID)`.
-	// But wait! If SQLTournamentStore calls draw.GenerateDraw(s, roundID), and draw.GenerateDraw imports db, then db importing draw would create a circular dependency.
-	// Ah! If db.TournamentStore doesn't call draw, but instead, the api handler calls `draw.GenerateDraw(store, roundID)`, then there is NO method `GenerateRoundDraw` on TournamentStore needed, OR we can define the method on the store, but wait...
-	// Wait! If the user and GPT explicitly suggested `GenerateDraw(...)` on `TournamentStore` interface, how can we avoid circular dependencies?
-	// If `TournamentStore` has `GenerateRoundDraw(roundID string) error`, and the concrete implementation `SQLiteStore` or `LibSQLStore` needs to run it, they can either:
-	// 1. Implement the draw algorithm internally (which is just a few queries and the Hungarian solver).
-	// 2. Or, we can use a function variable or interface injector so that draw registers itself to the store.
-	// 3. Or, `draw.GenerateDraw` is the one called by the API, and `GenerateRoundDraw` is not a method on `TournamentStore` but a separate function in the `draw` package that takes `TournamentStore` as a parameter.
-	// Wait, option 3 is extremely common in Go: `draw.GenerateDraw(store db.TournamentStore, roundID string) error`.
-	// Let's check: does that fit?
-	// The prompt's example:
-	// ```go
-	// type TournamentStore interface {
-	//     CreateTournament(...)
-	//     SaveBallot(...)
-	//     GetRound(...)
-	//     GenerateDraw(...)
-	// }
-	// ```
-	// This is just a conceptual example from the user and GPT. The user says: "Define a storage interface, for example...". They don't mandate the exact methods.
-	// If we define `draw.GenerateDraw(store TournamentStore, roundID string) error`, it is incredibly clean, avoids circular dependencies completely, keeps the draw algorithm in the `draw` package, and keeps the store in the `db` package!
-	// Wait! Let's think: is that perfectly modular and clean?
-	// Yes! Let's double check if we can do that.
-	// Yes, `draw.GenerateDraw(store db.TournamentStore, roundID string) error` is beautiful!
-	return nil
-}
-
 // SQLiteStore is the concrete SQLite implementation of TournamentStore.
 type SQLiteStore struct {
 	*SQLTournamentStore
@@ -1403,52 +1384,11 @@ type SQLiteStore struct {
 
 // NewSQLiteStore opens a connection to a local SQLite database and returns a SQLiteStore.
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := InitTournamentDB(dbPath)
 	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(TournamentSchema); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err := applyColumnMigrations(db); err != nil {
-		db.Close()
 		return nil, err
 	}
 	return &SQLiteStore{
-		SQLTournamentStore: NewSQLTournamentStore(db),
-	}, nil
-}
-
-// LibSQLStore is the concrete LibSQL implementation of TournamentStore.
-type LibSQLStore struct {
-	*SQLTournamentStore
-}
-
-// NewLibSQLStore opens a connection to a LibSQL database and returns a LibSQLStore.
-func NewLibSQLStore(url string) (*LibSQLStore, error) {
-	// Standard libSQL/Turso connection uses the standard sql.Open with a different driver or config,
-	// depending on compilation/import. For now we use "sqlite" or "turso" if registered.
-	// To support both plain SQLite files and LibSQL URLs, we can open with "sqlite" or "turso".
-	driver := "sqlite"
-	if strings.HasPrefix(url, "libsql://") || strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-		driver = "turso"
-	}
-	db, err := sql.Open(driver, url)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(TournamentSchema); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err := applyColumnMigrations(db); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return &LibSQLStore{
 		SQLTournamentStore: NewSQLTournamentStore(db),
 	}, nil
 }

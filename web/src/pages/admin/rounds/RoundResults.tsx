@@ -105,13 +105,27 @@ export default function RoundResults() {
         results: resultsPayload
       });
 
-      await fetchAPI(`/api/t/${slug}/ballots/${res.id}/confirm`, 'POST');
+      if (isDoubleEntry) {
+        try {
+          await fetchAPI(`/api/t/${slug}/ballots/${res.id}/confirm`, 'POST');
+          alert("Double-entry matched and confirmed!");
+        } catch (confirmErr: any) {
+          if (confirmErr.data?.error === 'discrepancy') {
+            setDiscrepancyDiffs(confirmErr.data.diffs || []);
+            queryClient.invalidateQueries({ queryKey: ['round-ballots', slug, roundId] });
+            return;
+          }
+          alert("Draft saved to entry group. Submit the second entry to verify and confirm.");
+        }
+      } else {
+        await fetchAPI(`/api/t/${slug}/ballots/${res.id}/confirm`, 'POST');
+        alert("Ballot entered and confirmed!");
+      }
 
       setDebateBallot(null);
       queryClient.invalidateQueries({ queryKey: ['draw', slug, roundId] });
       queryClient.invalidateQueries({ queryKey: ['standings'] });
       queryClient.invalidateQueries({ queryKey: ['round-ballots', slug, roundId] });
-      alert("Ballot entered and confirmed!");
     } catch (err: any) {
       if (err.data?.error === 'discrepancy') {
         setDiscrepancyDiffs(err.data.diffs || []);

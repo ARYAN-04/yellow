@@ -148,17 +148,25 @@ export default function AdminLayout() {
         if (current && current.is_archived) {
           setAuthed(true); // Bypass login screen for archived public views
         } else {
-          fetchAPI(`/api/t/${slug}/institutions`)
+          fetchAPI('/api/auth/me')
             .then(() => setAuthed(true))
             .catch(() => setAuthed(false));
         }
       })
       .catch(() => {
-        fetchAPI(`/api/t/${slug}/institutions`)
+        fetchAPI('/api/auth/me')
           .then(() => setAuthed(true))
           .catch(() => setAuthed(false));
       });
   }, [slug]);
+
+  const handleLogout = async () => {
+    try {
+      await fetchAPI('/api/logout', 'POST');
+    } finally {
+      setAuthed(false);
+    }
+  };
 
   const isReadOnly = tournamentInfo?.is_archived === 1 || tournamentInfo?.is_archived === true;
 
@@ -181,9 +189,16 @@ export default function AdminLayout() {
           <div className="logo-text" style={{ fontSize: '1rem' }}>
             Yellow {isReadOnly ? 'Record' : 'Admin'} <span style={{ color: 'var(--accent)', fontSize: '0.8rem', fontWeight: '500' }}>/{slug}</span>
           </div>
-          <NavLink to="/" className="btn btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
-            Exit {isReadOnly ? 'View' : ''}
-          </NavLink>
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            {!isReadOnly && (
+              <button type="button" onClick={handleLogout} className="btn btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
+                Log Out
+              </button>
+            )}
+            <NavLink to="/" className="btn btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem' }}>
+              Exit {isReadOnly ? 'View' : ''}
+            </NavLink>
+          </div>
         </header>
         <main className="admin-content">
           {isReadOnly && (

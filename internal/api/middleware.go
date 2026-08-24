@@ -24,6 +24,38 @@ func (api *API) IsAdmin(r *http.Request) bool {
 	return false
 }
 
+// RequireAdmin ensures the requester is an authorized organizer/admin before executing next.
+// If the tournament is archived, read-only (GET) access is allowed for public records.
+func (api *API) RequireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if api.IsAdmin(r) {
+			next(w, r)
+			return
+		}
+
+		slug := r.PathValue("slug")
+		if slug != "" && r.Method == http.MethodGet {
+			var isArchived bool
+			err := api.GlobalDB.QueryRow("SELECT is_archived FROM tournaments WHERE slug = ?", slug).Scan(&isArchived)
+			if err == nil && isArchived {
+				next(w, r)
+				return
+			}
+		}
+
+		JSONError(w, "unauthorized: admin session required", http.StatusUnauthorized)
+	}
+}
+
+// CheckAuth handles GET /api/auth/me to verify current admin session status.
+func (api *API) CheckAuth(w http.ResponseWriter, r *http.Request) {
+	if api.IsAdmin(r) {
+		JSONResponse(w, map[string]interface{}{"authenticated": true, "user": "admin"}, http.StatusOK)
+		return
+	}
+	JSONError(w, "unauthorized", http.StatusUnauthorized)
+}
+
 // ValidateToken looks up the token inside the tournament database to resolve ownership.
 func (api *API) ValidateToken(tdb db.TournamentStore, token string) (*models.TokenOwner, error) {
 	return tdb.ValidateToken(token)
@@ -39,6 +71,15 @@ func (api *API) CanViewRound(tdb db.TournamentStore, roundID string, isAdmin boo
 func (api *API) WriteBlocker(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slug := r.PathValue("slug")
+		if slug == "" {
+			token := r.PathValue("token")
+			if token != "" {
+				if info, err := api.resolveTokenHelper(token); err == nil && info != nil {
+					slug = info.Slug
+				}
+			}
+		}
+
 		if slug != "" {
 			var isArchived bool
 			err := api.GlobalDB.QueryRow("SELECT is_archived FROM tournaments WHERE slug = ?", slug).Scan(&isArchived)

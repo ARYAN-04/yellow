@@ -626,7 +626,7 @@ func confirmWithDoubleEntry(tdb db.TournamentStore, ballotID string) error {
 		return err
 	}
 	if len(pending) < 2 {
-		return tdb.ConfirmBallot(ballotID)
+		return fmt.Errorf("double-entry verification requires 2 matching drafts before confirmation")
 	}
 
 	diffs := db.CompareBallotSummaries(pending[0], pending[1])

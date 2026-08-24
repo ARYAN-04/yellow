@@ -86,21 +86,15 @@ func (s *SQLTournamentStore) SetCheckedIn(entityType, entityID string, checkedIn
 	if checkedIn {
 		checkedAt = time.Now()
 	}
-	res, err := s.db.Exec(
-		"UPDATE checkins SET checked_in_at = ? WHERE entity_type = ? AND entity_id = ?",
-		checkedAt, entityType, entityID,
-	)
-	if err != nil {
-		return err
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
+	id := uuid.New().String()
+	token := uuid.New().String()
+	_, err := s.db.Exec(`
+		INSERT INTO checkins (id, entity_type, entity_id, checked_in_at, checkin_token)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+			checked_in_at = excluded.checked_in_at
+	`, id, entityType, entityID, checkedAt, token)
+	return err
 }
 
 func (s *SQLTournamentStore) ResolveCheckinToken(token string) (*models.CheckinTokenInfo, error) {
