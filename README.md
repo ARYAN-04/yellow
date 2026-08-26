@@ -92,3 +92,10 @@ go test -v ./...
 # 2. Compile static Go binary
 go build -o yellow ./cmd/server
 ```
+
+---
+
+## 4. License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
