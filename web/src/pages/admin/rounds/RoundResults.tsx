@@ -3,10 +3,19 @@ import { useOutletContext } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { MapPin, RefreshCw } from 'lucide-react';
 import { fetchAPI, type RoundContext } from '../../../lib/api';
+import { getRoleSlotsForSide, type RoleSlot } from '../../../lib/roles';
 
 interface ScoreEntry {
-  points: number,
-  speakerPoints: number,
+  points: number;
+  speakerPoints: number;
+}
+
+interface RoleScoreEntry {
+  speakerId: string;
+  score: number;
+  isReply: boolean;
+  role: string;
+  speechOrder: number;
 }
 
 const statusChipStyle: Record<string, React.CSSProperties> = {
@@ -35,11 +44,19 @@ export default function RoundResults() {
   const [isDoubleEntry, setIsDoubleEntry] = useState(false);
   const [entryGroup, setEntryGroup] = useState('');
   const [discrepancyDiffs, setDiscrepancyDiffs] = useState<any[] | null>(null);
+  const [teamRoleScores, setTeamRoleScores] = useState<Record<string, RoleScoreEntry[]>>({});
 
   const { data: draw = [], isLoading } = useQuery<any[]>({
     queryKey: ['draw', slug, roundId],
     queryFn: () => fetchAPI(`/api/t/${slug}/rounds/${roundId}/draw`),
   });
+
+  const { data: teamsList = [] } = useQuery<any[]>({
+    queryKey: ['teams', slug],
+    queryFn: () => fetchAPI(`/api/t/${slug}/teams`),
+  });
+
+  const teamsMap = new Map<string, any>(teamsList.map(t => [t.id, t]));
 
   const { data: registry = [], refetch: refetchRegistry } = useQuery<any[]>({
     queryKey: ['round-ballots', slug, roundId],
@@ -53,21 +70,88 @@ export default function RoundResults() {
     setIsDoubleEntry(false);
     setDiscrepancyDiffs(null);
     setEntryGroup(`eg-${Date.now().toString(36)}`);
+
     const initialResults: Record<string, ScoreEntry> = {};
-    debate.teams.forEach((t: any) => {
-      initialResults[t.team_id] = { points: 0, speakerPoints: 150 };
+    const initialRoleScores: Record<string, RoleScoreEntry[]> = {};
+
+    (debate.teams || []).forEach((t: any) => {
+      const fullTeam = teamsMap.get(t.team_id);
+      const sps = fullTeam?.speakers || [];
+      const slots: RoleSlot[] = getRoleSlotsForSide(t.side, (debate.teams || []).length);
+
+      const roleEntries: RoleScoreEntry[] = slots.map((slot, idx) => {
+        const assignedSpeaker = sps[idx] || sps[0] || null;
+        return {
+          speakerId: assignedSpeaker ? assignedSpeaker.id : '',
+          score: 75.0,
+          isReply: Boolean(slot.isReply),
+          role: slot.role,
+          speechOrder: slot.order || idx + 1,
+        };
+      });
+
+      initialRoleScores[t.team_id] = roleEntries;
+
+      let sum = 0;
+      roleEntries.forEach(r => {
+        if (!r.isReply) sum += r.score;
+      });
+
+      initialResults[t.team_id] = { points: 0, speakerPoints: sum || 150 };
     });
+
     setBallotResults(initialResults);
+    setTeamRoleScores(initialRoleScores);
+
     const initialSplit: Record<string, Record<string, ScoreEntry>> = {};
-    debate.adjudicators
+    (debate.adjudicators || [])
       .filter((a: any) => a.role !== 'trainee')
       .forEach((a: any) => {
         initialSplit[a.adjudicator_id] = {};
-        debate.teams.forEach((t: any) => {
-          initialSplit[a.adjudicator_id][t.team_id] = { points: 0, speakerPoints: 150 };
+        (debate.teams || []).forEach((t: any) => {
+          initialSplit[a.adjudicator_id][t.team_id] = { points: 0, speakerPoints: initialResults[t.team_id]?.speakerPoints || 150 };
         });
       });
     setSplitScores(initialSplit);
+  };
+
+  const handleRoleSpeakerChange = (teamId: string, roleIndex: number, speakerId: string) => {
+    const currentList = [...(teamRoleScores[teamId] || [])];
+    if (!currentList[roleIndex]) return;
+
+    currentList[roleIndex] = {
+      ...currentList[roleIndex],
+      speakerId: speakerId,
+    };
+
+    setTeamRoleScores({ ...teamRoleScores, [teamId]: currentList });
+  };
+
+  const handleRoleScoreChange = (teamId: string, roleIndex: number, score: number, isReply: boolean) => {
+    const currentList = [...(teamRoleScores[teamId] || [])];
+    if (!currentList[roleIndex]) return;
+
+    currentList[roleIndex] = {
+      ...currentList[roleIndex],
+      score,
+      isReply,
+    };
+
+    const nextScores = { ...teamRoleScores, [teamId]: currentList };
+    setTeamRoleScores(nextScores);
+
+    // Recompute total substantive speaker points
+    let sum = 0;
+    currentList.forEach(r => {
+      if (!r.isReply) sum += r.score;
+    });
+
+    if (sum > 0) {
+      setBallotResults(prev => ({
+        ...prev,
+        [teamId]: { ...prev[teamId], speakerPoints: sum }
+      }));
+    }
   };
 
   const submitBallot = async (e: React.FormEvent) => {
@@ -78,8 +162,8 @@ export default function RoundResults() {
     if (isSplit) {
       resultsPayload = [];
       Object.keys(splitScores).forEach(adjId => {
-        debateBallot.teams.forEach((t: any) => {
-          const entry = splitScores[adjId][t.team_id];
+        (debateBallot.teams || []).forEach((t: any) => {
+          const entry = splitScores[adjId]?.[t.team_id] || { points: 0, speakerPoints: 150 };
           resultsPayload.push({
             team_id: t.team_id,
             adjudicator_id: adjId,
@@ -89,11 +173,23 @@ export default function RoundResults() {
         });
       });
     } else {
-      resultsPayload = Object.keys(ballotResults).map(tid => ({
-        team_id: tid,
-        points: ballotResults[tid].points,
-        speaker_points: ballotResults[tid].speakerPoints
-      }));
+      resultsPayload = Object.keys(ballotResults).map(tid => {
+        const roles = teamRoleScores[tid] || [];
+        const spScoresList = roles.map(r => ({
+          speaker_id: r.speakerId,
+          score: Number(r.score),
+          is_reply: Boolean(r.isReply),
+          speech_order: r.speechOrder,
+          role: r.role,
+        }));
+
+        return {
+          team_id: tid,
+          points: ballotResults[tid].points,
+          speaker_points: ballotResults[tid].speakerPoints,
+          speaker_scores: spScoresList.length > 0 ? spScoresList : undefined,
+        };
+      });
     }
 
     try {
@@ -269,51 +365,110 @@ export default function RoundResults() {
                 </div>
               )}
 
-              {!isSplit && debateBallot.teams.map((t: any) => (
-                <div key={t.team_id} style={{ padding: '1rem', borderBottom: '1px solid var(--border)', marginBottom: '1rem' }}>
-                  <div style={{ fontWeight: '600', color: 'var(--text-h)', marginBottom: '0.5rem' }}>
-                    {t.team_name} ({t.side.toUpperCase()})
-                  </div>
-                  <div className="grid grid-cols-2" style={{ gap: '0.75rem' }}>
-                    <div>
-                      <label className="label">Wins / Rank Points</label>
-                      <select
-                        className="input select"
-                        value={ballotResults[t.team_id]?.points || 0}
-                        onChange={e => setBallotResults({
-                          ...ballotResults,
-                          [t.team_id]: { ...ballotResults[t.team_id], points: Number(e.target.value) }
-                        })}
-                      >
-                        <option value="3">3 Points (1st Place)</option>
-                        <option value="2">2 Points (2nd Place)</option>
-                        <option value="1">1 Point (3rd Place)</option>
-                        <option value="0">0 Points (4th Place)</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="label">Total Speaker Points</label>
-                      <input
-                        type="number"
-                        step="0.5"
-                        className="input"
-                        value={ballotResults[t.team_id]?.speakerPoints || 150}
-                        onChange={e => setBallotResults({
-                          ...ballotResults,
-                          [t.team_id]: { ...ballotResults[t.team_id], speakerPoints: Number(e.target.value) }
-                        })}
-                      />
-                    </div>
-                  </div>
-                </div>
-              ))}
+              {!isSplit && (debateBallot.teams || []).map((t: any) => {
+                const fullTeam = teamsMap.get(t.team_id);
+                const speakers = fullTeam?.speakers || [];
+                const roles = teamRoleScores[t.team_id] || [];
+                const isTwoTeam = (debateBallot.teams || []).length === 2;
 
-              {isSplit && debateBallot.adjudicators.filter((a: any) => a.role !== 'trainee').map((a: any) => (
+                return (
+                  <div key={t.team_id} style={{ padding: '1rem', borderBottom: '1px solid var(--border)', marginBottom: '1rem' }}>
+                    <div style={{ fontWeight: '600', color: 'var(--text-h)', marginBottom: '0.5rem', display: 'flex', justifyContent: 'space-between' }}>
+                      <span>{t.team_name}</span>
+                      <span className="badge badge-info" style={{ textTransform: 'uppercase' }}>{t.side}</span>
+                    </div>
+                    <div className="grid grid-cols-2" style={{ gap: '0.75rem' }}>
+                      <div>
+                        <label className="label">Wins / Rank Points</label>
+                        <select
+                          className="input select"
+                          value={ballotResults[t.team_id]?.points || 0}
+                          onChange={e => setBallotResults({
+                            ...ballotResults,
+                            [t.team_id]: { ...ballotResults[t.team_id], points: Number(e.target.value) }
+                          })}
+                        >
+                          {isTwoTeam ? (
+                            <>
+                              <option value="1">1 Point (Win)</option>
+                              <option value="0">0 Points (Loss)</option>
+                            </>
+                          ) : (
+                            <>
+                              <option value="3">3 Points (1st Place)</option>
+                              <option value="2">2 Points (2nd Place)</option>
+                              <option value="1">1 Point (3rd Place)</option>
+                              <option value="0">0 Points (4th Place)</option>
+                            </>
+                          )}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="label">Total Speaker Points</label>
+                        <input
+                          type="number"
+                          step="0.5"
+                          className="input"
+                          value={ballotResults[t.team_id]?.speakerPoints || 150}
+                          onChange={e => setBallotResults({
+                            ...ballotResults,
+                            [t.team_id]: { ...ballotResults[t.team_id], speakerPoints: Number(e.target.value) }
+                          })}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Role-Wise Speaker Scores */}
+                    {roles.length > 0 && (
+                      <div style={{ marginTop: '0.75rem', background: 'rgba(0,0,0,0.02)', padding: '0.75rem', borderRadius: '6px', border: '1px solid var(--border)' }}>
+                        <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-mute)', marginBottom: '0.5rem', textTransform: 'uppercase' }}>
+                          Speaker-Wise Scores &amp; Role Positions
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                          {roles.map((r, idx) => (
+                            <div key={idx} style={{ display: 'grid', gridTemplateColumns: '1.2fr 2fr 1fr', gap: '0.5rem', alignItems: 'center' }}>
+                              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
+                                <span style={{ fontWeight: 600, fontSize: '0.85rem' }}>{r.role}</span>
+                                {r.isReply && <span className="badge badge-warning" style={{ fontSize: '0.65rem' }}>Reply</span>}
+                              </div>
+
+                              <select
+                                className="input select"
+                                style={{ fontSize: '0.8rem', padding: '4px 8px' }}
+                                value={r.speakerId}
+                                onChange={e => handleRoleSpeakerChange(t.team_id, idx, e.target.value)}
+                              >
+                                <option value="">-- Select Speaker --</option>
+                                {speakers.map((sp: any) => (
+                                  <option key={sp.id} value={sp.id}>
+                                    {sp.name} {sp.is_novice ? '(Novice)' : ''}
+                                  </option>
+                                ))}
+                              </select>
+
+                              <input
+                                type="number"
+                                step="0.5"
+                                className="input"
+                                style={{ fontSize: '0.85rem', padding: '4px 8px', textAlign: 'right' }}
+                                value={r.score}
+                                onChange={e => handleRoleScoreChange(t.team_id, idx, Number(e.target.value), r.isReply)}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {isSplit && (debateBallot.adjudicators || []).filter((a: any) => a.role !== 'trainee').map((a: any) => (
                 <div key={a.adjudicator_id} style={{ padding: '1rem', borderBottom: '1px solid var(--border)', marginBottom: '1rem' }}>
                   <div style={{ fontWeight: '600', color: 'var(--text-h)', marginBottom: '0.5rem' }}>
                     {a.adjudicator_name} <span className="badge badge-info" style={{ marginLeft: '0.4rem', textTransform: 'uppercase' }}>{a.role}</span>
                   </div>
-                  {debateBallot.teams.map((t: any) => (
+                  {(debateBallot.teams || []).map((t: any) => (
                     <div key={t.team_id} className="grid grid-cols-2" style={{ gap: '0.75rem', marginTop: '0.5rem' }}>
                       <div>
                         <label className="label">{t.team_name} — Points</label>

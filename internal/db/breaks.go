@@ -34,6 +34,7 @@ func (s *SQLTournamentStore) ComputeBreak(categoryID string) (*models.BreakResul
 	res := &models.BreakResult{CategoryID: categoryID, Qualifiers: []models.BreakTeam{}}
 
 	filter := ""
+	var maxPerInst *int
 	switch categoryID {
 	case "open":
 		res.CategoryName = "Open"
@@ -56,6 +57,7 @@ func (s *SQLTournamentStore) ComputeBreak(categoryID string) (*models.BreakResul
 			if c.ID == categoryID {
 				res.CategoryName = c.Name
 				res.Size = c.Size
+				maxPerInst = c.MaxTeamsPerInstitution
 				filter = categoryID
 				found = true
 				break
@@ -70,21 +72,41 @@ func (s *SQLTournamentStore) ComputeBreak(categoryID string) (*models.BreakResul
 	if err != nil {
 		return nil, err
 	}
-	s.applyBreakCutoff(res, standings)
+	s.applyBreakCutoff(res, standings, maxPerInst)
 	return res, nil
 }
 
 // applyBreakCutoff caps qualifiers at the category size and flags bubble teams:
 // teams tied on points with the last qualifier, both inside and just outside the cutoff.
-func (s *SQLTournamentStore) applyBreakCutoff(res *models.BreakResult, standings []models.Standing) {
+// If maxPerInst is set, it caps qualifiers per institution, continuing down standings.
+func (s *SQLTournamentStore) applyBreakCutoff(res *models.BreakResult, standings []models.Standing, maxPerInst *int) {
+	instCounts := make(map[string]int)
+	limitPerInst := 0
+	if maxPerInst != nil && *maxPerInst > 0 {
+		limitPerInst = *maxPerInst
+	}
+
+	var eligible []models.Standing
+	for _, st := range standings {
+		inst := strings.TrimSpace(st.InstitutionCode)
+		if limitPerInst > 0 && inst != "" {
+			if instCounts[inst] >= limitPerInst {
+				continue
+			}
+			instCounts[inst]++
+		}
+		eligible = append(eligible, st)
+	}
+
 	cutoff := 0
-	if len(standings) > 0 {
-		cutoff = standings[len(standings)-1].Points
-		if res.Size != nil && *res.Size < len(standings) {
-			cutoff = standings[*res.Size-1].Points
+	if len(eligible) > 0 {
+		cutoff = eligible[len(eligible)-1].Points
+		if res.Size != nil && *res.Size < len(eligible) {
+			cutoff = eligible[*res.Size-1].Points
 		}
 	}
-	for i, st := range standings {
+
+	for i, st := range eligible {
 		rank := i + 1
 		if res.Size != nil && rank > *res.Size && st.Points != cutoff {
 			break

@@ -80,18 +80,87 @@ func (api *API) MoveTeamAssignment(w http.ResponseWriter, r *http.Request) {
 // debate using swap-with-same-role semantics, optionally changing its role.
 func (api *API) MoveAdjudicatorAssignment(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
+	debateID := r.PathValue("debate_id")
 	tdb, err := api.DBMgr.Get(slug)
 	if err != nil {
 		JSONError(w, err.Error(), http.StatusNotFound)
 		return
 	}
 
-	req, ok := decodeMoveRequest(w, r)
-	if !ok {
+	var req MoveAssignmentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		JSONError(w, "invalid JSON", http.StatusBadRequest)
 		return
+	}
+	if req.TargetDebateID == "" {
+		req.TargetDebateID = debateID
 	}
 
 	roundID, err := tdb.MoveSwapAdjudicatorAssignment(r.PathValue("adj_assignment_id"), req.TargetDebateID, req.Role)
+	if writeMoveError(w, err) {
+		return
+	}
+
+	draw, err := tdb.GetRoundDraw(roundID)
+	if err != nil {
+		JSONError(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	JSONResponse(w, draw, http.StatusOK)
+}
+
+// AddDebateAdjudicatorRequest represents the payload for assigning an unallocated judge to a debate.
+type AddDebateAdjudicatorRequest struct {
+	AdjudicatorID string `json:"adjudicator_id"`
+	Role          string `json:"role,omitempty"`
+}
+
+// AddDebateAdjudicator assigns an unallocated adjudicator into a debate panel.
+func (api *API) AddDebateAdjudicator(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	debateID := r.PathValue("debate_id")
+	tdb, err := api.DBMgr.Get(slug)
+	if err != nil {
+		JSONError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	var req AddDebateAdjudicatorRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		JSONError(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.AdjudicatorID == "" {
+		JSONError(w, "adjudicator_id is required", http.StatusBadRequest)
+		return
+	}
+
+	roundID, err := tdb.AddAdjudicatorToDebate(debateID, req.AdjudicatorID, req.Role)
+	if writeMoveError(w, err) {
+		return
+	}
+
+	draw, err := tdb.GetRoundDraw(roundID)
+	if err != nil {
+		JSONError(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	JSONResponse(w, draw, http.StatusOK)
+}
+
+// DeleteDebateAdjudicator removes an adjudicator from a debate back to the unallocated scratch pool.
+func (api *API) DeleteDebateAdjudicator(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	adjAssignmentID := r.PathValue("adj_assignment_id")
+	tdb, err := api.DBMgr.Get(slug)
+	if err != nil {
+		JSONError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	roundID, err := tdb.RemoveAdjudicatorFromDebate(adjAssignmentID)
 	if writeMoveError(w, err) {
 		return
 	}

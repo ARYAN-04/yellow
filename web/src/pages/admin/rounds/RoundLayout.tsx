@@ -12,7 +12,7 @@ const subTabs = [
 
 export default function RoundLayout() {
   const { slug, roundId } = useParams<{ slug: string; roundId: string }>();
-  const { isReadOnly } = useOutletContext<AdminContext>();
+  const { isReadOnly, role, isAssistant } = useOutletContext<AdminContext>();
 
   const { data: rounds = [] } = useQuery<any[]>({
     queryKey: ['rounds', slug],
@@ -44,7 +44,7 @@ export default function RoundLayout() {
         ))}
       </div>
 
-      <Outlet context={{ slug: slug ?? '', isReadOnly, roundId: roundId ?? '', round } satisfies RoundContext} />
+      <Outlet context={{ slug: slug ?? '', isReadOnly, role, isAssistant, roundId: roundId ?? '', round } satisfies RoundContext} />
     </div>
   );
 }

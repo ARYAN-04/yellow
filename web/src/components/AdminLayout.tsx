@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import LoginPage from '../pages/LoginPage';
+import ErrorBoundary from './ErrorBoundary';
 import { fetchAPI, type AdminContext } from '../lib/api';
 
 const tournamentLinks = [
@@ -137,6 +138,7 @@ export default function AdminLayout() {
   const { slug } = useParams<{ slug: string }>();
   const queryClient = useQueryClient();
   const [authed, setAuthed] = useState(false);
+  const [userRole, setUserRole] = useState<string>('admin');
   const [tournamentInfo, setTournamentInfo] = useState<any>(null);
 
   // Check login and archive status
@@ -149,13 +151,19 @@ export default function AdminLayout() {
           setAuthed(true); // Bypass login screen for archived public views
         } else {
           fetchAPI('/api/auth/me')
-            .then(() => setAuthed(true))
+            .then(res => {
+              setAuthed(true);
+              if (res?.role) setUserRole(res.role);
+            })
             .catch(() => setAuthed(false));
         }
       })
       .catch(() => {
         fetchAPI('/api/auth/me')
-          .then(() => setAuthed(true))
+          .then(res => {
+            setAuthed(true);
+            if (res?.role) setUserRole(res.role);
+          })
           .catch(() => setAuthed(false));
       });
   }, [slug]);
@@ -169,13 +177,22 @@ export default function AdminLayout() {
   };
 
   const isReadOnly = tournamentInfo?.is_archived === 1 || tournamentInfo?.is_archived === true;
+  const isAssistant = userRole === 'assistant';
 
   if (!authed) {
     return (
       <LoginPage
         onSuccess={() => {
-          setAuthed(true);
-          queryClient.invalidateQueries({ queryKey: ['tournaments'] });
+          fetchAPI('/api/auth/me')
+            .then(res => {
+              setAuthed(true);
+              if (res?.role) setUserRole(res.role);
+              queryClient.invalidateQueries({ queryKey: ['tournaments'] });
+            })
+            .catch(() => {
+              setAuthed(true);
+              queryClient.invalidateQueries({ queryKey: ['tournaments'] });
+            });
         }}
       />
     );
@@ -186,8 +203,13 @@ export default function AdminLayout() {
       <Sidebar />
       <div className="admin-main">
         <header className="admin-topbar">
-          <div className="logo-text" style={{ fontSize: '1rem' }}>
-            Yellow {isReadOnly ? 'Record' : 'Admin'} <span style={{ color: 'var(--accent)', fontSize: '0.8rem', fontWeight: '500' }}>/{slug}</span>
+          <div className="logo-text" style={{ fontSize: '1rem', display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            <span>Yellow {isReadOnly ? 'Record' : 'Admin'} <span style={{ color: 'var(--accent)', fontSize: '0.8rem', fontWeight: '500' }}>/{slug}</span></span>
+            {isAssistant && (
+              <span className="badge badge-warning" style={{ fontSize: '0.7rem', padding: '2px 8px', fontWeight: 600 }}>
+                Assistant Operator
+              </span>
+            )}
           </div>
           <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
             {!isReadOnly && (
@@ -206,7 +228,9 @@ export default function AdminLayout() {
               This tournament record is archived and read-only.
             </div>
           )}
-          <Outlet context={{ slug: slug ?? '', isReadOnly } satisfies AdminContext} />
+          <ErrorBoundary fallbackTitle="Error loading admin module">
+            <Outlet context={{ slug: slug ?? '', isReadOnly, role: userRole, isAssistant } satisfies AdminContext} />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

@@ -13,7 +13,8 @@ const baseTabs = [
 
 export default function Breaks() {
   const { slug } = useParams<{ slug: string }>();
-  const { isReadOnly } = useOutletContext<AdminContext>();
+  const { isReadOnly, isAssistant } = useOutletContext<AdminContext>();
+  const isRestricted = isReadOnly || isAssistant;
   const queryClient = useQueryClient();
   const [category, setCategory] = useState('open');
 
@@ -33,7 +34,8 @@ export default function Breaks() {
     onError: (err: any) => alert('Failed to publish break: ' + err.message),
   });
 
-  const tabs = [...baseTabs, ...categories.map((c: any) => ({ key: c.id, label: c.name }))];
+  const tabs = [...baseTabs, ...(categories || []).map((c: any) => ({ key: c.id, label: c.name }))];
+  const qualifiers = breakResult?.qualifiers || [];
 
   return (
     <div>
@@ -41,7 +43,7 @@ export default function Breaks() {
         <h2 style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', margin: 0 }}>
           <Trophy size={20} /> Break
         </h2>
-        {!isReadOnly && (
+        {!isRestricted && (
           <button className="btn btn-primary" onClick={() => publish.mutate()} disabled={publish.isPending}>
             <Upload size={15} /> Publish Break Snapshot
           </button>
@@ -59,14 +61,14 @@ export default function Breaks() {
 
         {breakResult && (
           <p style={{ color: 'var(--text-mute)', fontSize: '0.85rem', margin: '0 0 1rem' }}>
-            {breakResult.category_name} &middot; cutoff at {breakResult.cutoff} points
+            {breakResult.category_name} &middot; cutoff at {breakResult.cutoff ?? 0} points
             {breakResult.size ? ` (break size ${breakResult.size})` : ''}
           </p>
         )}
 
         {isLoading ? (
           <div style={{ padding: '3rem 0', color: 'var(--text-mute)', textAlign: 'center' }}>Computing break...</div>
-        ) : !breakResult || breakResult.qualifiers.length === 0 ? (
+        ) : !breakResult || qualifiers.length === 0 ? (
           <div style={{ padding: '3rem 0', color: 'var(--text-mute)', textAlign: 'center' }}>
             No qualifiers computed yet — confirm some round results first.
           </div>
@@ -84,8 +86,8 @@ export default function Breaks() {
                 </tr>
               </thead>
               <tbody>
-                {breakResult.qualifiers.map((q: any) => (
-                  <tr key={q.team_id} style={q.rank > (breakResult.size ?? Infinity) ? { opacity: 0.55 } : undefined}>
+                {qualifiers.map((q: any) => (
+                  <tr key={q.team_id} style={q.rank > (breakResult?.size ?? Infinity) ? { opacity: 0.55 } : undefined}>
                     <td style={{ fontWeight: '600', color: 'var(--accent)' }}>{q.rank}</td>
                     <td style={{ fontWeight: '500', color: 'var(--text-h)' }}>
                       {q.team_name}
@@ -96,7 +98,7 @@ export default function Breaks() {
                       ) : null}
                     </td>
                     <td>{q.points}</td>
-                    <td>{q.speaker_points.toFixed(1)}</td>
+                    <td>{q.speaker_points?.toFixed(1) || '0.0'}</td>
                     <td>{(q.margin || 0).toFixed(1)}</td>
                     <td>{q.bubble && <span className="badge badge-warning">Bubble</span>}</td>
                   </tr>

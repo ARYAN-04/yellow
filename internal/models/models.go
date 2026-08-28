@@ -66,11 +66,13 @@ type Team struct {
 
 // BreakCategory represents a break qualification category.
 type BreakCategory struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Seq        int    `json:"seq"`
-	Size       *int   `json:"size"`
-	BasePoints *int   `json:"base_points"`
+	ID                     string  `json:"id"`
+	Name                   string  `json:"name"`
+	Seq                    int     `json:"seq"`
+	Size                   *int    `json:"size"`
+	BasePoints             *int    `json:"base_points"`
+	MaxTeamsPerInstitution *int    `json:"max_teams_per_institution,omitempty"`
+	Rule                   *string `json:"rule,omitempty"`
 }
 
 // Adjudicator represents a tournament adjudicator.
@@ -96,11 +98,12 @@ type Round struct {
 
 // TeamAssignment represents a team assigned to a side in a debate.
 type TeamAssignment struct {
-	ID       string `json:"id,omitempty"`
-	TeamID   string `json:"team_id"`
-	TeamName string `json:"team_name"`
-	Side     string `json:"side"`
-	PullUp   bool   `json:"pull_up,omitempty"`
+	ID       string    `json:"id,omitempty"`
+	TeamID   string    `json:"team_id"`
+	TeamName string    `json:"team_name"`
+	Side     string    `json:"side"`
+	PullUp   bool      `json:"pull_up,omitempty"`
+	Speakers []Speaker `json:"speakers,omitempty"`
 }
 
 // AdjudicatorAssignment represents an adjudicator assigned to a role in a debate.
@@ -113,19 +116,78 @@ type AdjudicatorAssignment struct {
 
 // DebateDraw represents a debate round pairing.
 type DebateDraw struct {
-	ID           string                  `json:"id"`
-	Venue        string                  `json:"venue"`
-	Teams        []TeamAssignment        `json:"teams"`
-	Adjudicators []AdjudicatorAssignment `json:"adjudicators"`
+	ID              string                  `json:"id"`
+	Venue           string                  `json:"venue"`
+	VenueAccessible bool                    `json:"venue_accessible,omitempty"`
+	Teams           []TeamAssignment        `json:"teams"`
+	Adjudicators    []AdjudicatorAssignment `json:"adjudicators"`
+}
+
+// SpeakerScore represents a recorded individual speaker score on a ballot.
+type SpeakerScore struct {
+	ID          string  `json:"id"`
+	BallotID    string  `json:"ballot_id"`
+	SpeakerID   string  `json:"speaker_id"`
+	SpeakerName string  `json:"speaker_name,omitempty"`
+	TeamID      string  `json:"team_id"`
+	Score       float64 `json:"score"`
+	IsReply     bool    `json:"is_reply"`
+	SpeechOrder int     `json:"speech_order"`
+	Role        string  `json:"role,omitempty"`
+}
+
+// SpeakerScoreInput represents an individual speaker score input in a ballot payload.
+type SpeakerScoreInput struct {
+	SpeakerID   string  `json:"speaker_id"`
+	Score       float64 `json:"score"`
+	IsReply     bool    `json:"is_reply"`
+	SpeechOrder int     `json:"speech_order"`
+	Role        string  `json:"role,omitempty"`
 }
 
 // TeamBallotResult represents the result points for a team.
 // AdjudicatorID is set on split (per-judge) ballots; NULL means consensus.
 type TeamBallotResult struct {
-	TeamID        string  `json:"team_id"`
-	Points        int     `json:"points"`
-	SpeakerPoints float64 `json:"speaker_points"`
-	AdjudicatorID *string `json:"adjudicator_id,omitempty"`
+	TeamID        string              `json:"team_id"`
+	Points        int                 `json:"points"`
+	SpeakerPoints float64             `json:"speaker_points"`
+	AdjudicatorID *string             `json:"adjudicator_id,omitempty"`
+	SpeakerScores []SpeakerScoreInput `json:"speaker_scores,omitempty"`
+}
+
+// SpeakerStanding represents an individual speaker's cumulative rank and statistics.
+type SpeakerStanding struct {
+	Rank            int     `json:"rank"`
+	SpeakerID       string  `json:"speaker_id"`
+	SpeakerName     string  `json:"speaker_name"`
+	TeamID          string  `json:"team_id"`
+	TeamName        string  `json:"team_name"`
+	InstitutionCode string  `json:"institution_code"`
+	TotalScore      float64 `json:"total_score"`
+	AverageScore    float64 `json:"average_score"`
+	TrimmedScore    float64 `json:"trimmed_score"`
+	SpeechCount     int     `json:"speech_count"`
+	IsNovice        bool    `json:"is_novice"`
+	IsEsl           bool    `json:"is_esl"`
+	IsEfl           bool    `json:"is_efl"`
+}
+
+// AdjudicatorStanding represents an adjudicator's cumulative rankings, debate counts, and feedback metrics.
+type AdjudicatorStanding struct {
+	Rank                 int      `json:"rank"`
+	ID                   string   `json:"id"`
+	Name                 string   `json:"name"`
+	InstitutionID        *string  `json:"institution_id,omitempty"`
+	InstitutionName      *string  `json:"institution_name,omitempty"`
+	InstitutionCode      *string  `json:"institution_code,omitempty"`
+	TestScore            float64  `json:"test_score"`
+	FeedbackRating       *float64 `json:"feedback_rating,omitempty"`
+	DebatesCount         int      `json:"debates_count"`
+	ChairsCount          int      `json:"chairs_count"`
+	PanelsCount          int      `json:"panels_count"`
+	TraineesCount        int      `json:"trainees_count"`
+	AverageFeedbackScore *float64 `json:"average_feedback_score,omitempty"`
+	FeedbackCount        int      `json:"feedback_count"`
 }
 
 // BallotSummary represents a ballot and its results, used by the registry view.
@@ -163,10 +225,11 @@ type Standing struct {
 
 // TokenInfo represents the resolved access token details.
 type TokenInfo struct {
-	Slug      string `json:"slug"`
-	Type      string `json:"type"` // 'team', 'adjudicator'
-	OwnerID   string `json:"owner_id"`
-	OwnerName string `json:"owner_name"`
+	Slug      string    `json:"slug"`
+	Type      string    `json:"type"` // 'team', 'adjudicator'
+	OwnerID   string    `json:"owner_id"`
+	OwnerName string    `json:"owner_name"`
+	Speakers  []Speaker `json:"speakers,omitempty"`
 }
 
 // DebateInfo represents a debate for a participant portal.
@@ -181,6 +244,11 @@ type DebateInfo struct {
 	BallotStatus  string           `json:"ballot_status,omitempty"`
 	Points        *int             `json:"points,omitempty"`
 	SpeakerPoints *float64         `json:"speaker_points,omitempty"`
+	Motion        string           `json:"motion,omitempty"`
+	Chair         string           `json:"chair,omitempty"`
+	Panellists    []string         `json:"panellists,omitempty"`
+	Adjudicators  []string         `json:"adjudicators,omitempty"`
+	SpeakerScores []SpeakerScore   `json:"speaker_scores,omitempty"`
 }
 
 // BreakTeam represents one team's position in a break category.
@@ -359,4 +427,150 @@ type DebateDrawInput struct {
 	BracketPosition int
 	Teams           []TeamAssignment
 	Adjudicators    []AdjudicatorAssignment
+}
+
+// Motion represents a motion and its info slide for a tournament round.
+type Motion struct {
+	ID         string  `json:"id"`
+	RoundID    string  `json:"round_id"`
+	Seq        int     `json:"seq"`
+	Reference  string  `json:"reference"`
+	Text       string  `json:"text"`
+	InfoSlide  string  `json:"info_slide"`
+	ReleasedAt *string `json:"released_at"`
+}
+
+// MotionVeto represents a team's preference or veto ranking for a motion in a debate.
+type MotionVeto struct {
+	ID              string `json:"id"`
+	DebateID        string `json:"debate_id"`
+	TeamID          string `json:"team_id"`
+	TeamName        string `json:"team_name"`
+	MotionID        string `json:"motion_id"`
+	MotionReference string `json:"motion_reference"`
+	MotionText      string `json:"motion_text"`
+	Preference      int    `json:"preference"`
+}
+
+// MotionStatistics represents win rate and positional statistics for a motion.
+type MotionStatistics struct {
+	MotionID         string                 `json:"motion_id"`
+	Reference        string                 `json:"reference"`
+	Text             string                 `json:"text"`
+	RoundName        string                 `json:"round_name"`
+	TotalDebates     int                    `json:"total_debates"`
+	SideWins         map[string]int         `json:"side_wins"`
+	SidePercentages  map[string]float64     `json:"side_percentages"`
+	PositionalCounts map[string]map[int]int `json:"positional_counts"`
+}
+
+// Venue represents a debate venue/room with priority and accessibility flags.
+type Venue struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	Priority     int     `json:"priority"`
+	CategoryID   *string `json:"category_id"`
+	IsAccessible bool    `json:"is_accessible"`
+}
+
+// TeamTrajectoryOpponent represents an opposing team in a debate.
+type TeamTrajectoryOpponent struct {
+	TeamID   string `json:"team_id"`
+	TeamName string `json:"team_name"`
+	Side     string `json:"side"`
+}
+
+// TeamTrajectoryAdjudicator represents an adjudicator assigned to a debate.
+type TeamTrajectoryAdjudicator struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
+// SpeakerScoreEntry represents a single speaker score entry on a ballot.
+type SpeakerScoreEntry struct {
+	SpeakerID   string  `json:"speaker_id"`
+	SpeakerName string  `json:"speaker_name"`
+	Score       float64 `json:"score"`
+	IsReply     bool    `json:"is_reply"`
+	SpeechOrder int     `json:"speech_order"`
+	Role        string  `json:"role,omitempty"`
+}
+
+// TeamTrajectoryDebate represents a single round's debate in a team's trajectory.
+type TeamTrajectoryDebate struct {
+	RoundID         string                      `json:"round_id"`
+	RoundSeq        int                         `json:"round_seq"`
+	RoundName       string                      `json:"round_name"`
+	RoundStage      string                      `json:"round_stage"`
+	Silent          bool                        `json:"silent"`
+	DrawReleased    bool                        `json:"draw_released"`
+	ResultsReleased bool                        `json:"results_released"`
+	DebateID        string                      `json:"debate_id"`
+	Venue           string                      `json:"venue"`
+	Side            string                      `json:"side"`
+	PullUp          bool                        `json:"pull_up"`
+	Opponents       []TeamTrajectoryOpponent    `json:"opponents"`
+	Adjudicators    []TeamTrajectoryAdjudicator `json:"adjudicators"`
+	BallotStatus    *string                     `json:"ballot_status,omitempty"`
+	Points          *int                        `json:"points,omitempty"`
+	SpeakerPoints   *float64                    `json:"speaker_points,omitempty"`
+	SpeakerScores   []SpeakerScoreEntry         `json:"speaker_scores,omitempty"`
+}
+
+// TeamTrajectory represents a team's full trajectory and round-by-round history.
+type TeamTrajectory struct {
+	Team    Team                   `json:"team"`
+	Debates []TeamTrajectoryDebate `json:"debates"`
+}
+
+// SpeakerTrajectorySpeech represents a speech in a speaker's trajectory.
+type SpeakerTrajectorySpeech struct {
+	RoundID         string   `json:"round_id"`
+	RoundSeq        int      `json:"round_seq"`
+	RoundName       string   `json:"round_name"`
+	RoundStage      string   `json:"round_stage"`
+	Silent          bool     `json:"silent"`
+	DrawReleased    bool     `json:"draw_released"`
+	ResultsReleased bool     `json:"results_released"`
+	DebateID        string   `json:"debate_id"`
+	Venue           string   `json:"venue"`
+	Side            string   `json:"side"`
+	SpeechOrder     int      `json:"speech_order"`
+	IsReply         bool     `json:"is_reply"`
+	Role            string   `json:"role,omitempty"`
+	Score           *float64 `json:"score,omitempty"`
+	TeamPoints      *int     `json:"team_points,omitempty"`
+	BallotStatus    *string  `json:"ballot_status,omitempty"`
+}
+
+// SpeakerTrajectory represents a speaker's full trajectory and speech history.
+type SpeakerTrajectory struct {
+	Speaker  Speaker                   `json:"speaker"`
+	TeamID   string                    `json:"team_id"`
+	TeamName string                    `json:"team_name"`
+	Speeches []SpeakerTrajectorySpeech `json:"speeches"`
+}
+
+// AdjudicatorTrajectoryDebate represents a single round's debate in an adjudicator's judging history.
+type AdjudicatorTrajectoryDebate struct {
+	RoundID         string                      `json:"round_id"`
+	RoundSeq        int                         `json:"round_seq"`
+	RoundName       string                      `json:"round_name"`
+	RoundStage      string                      `json:"round_stage"`
+	Silent          bool                        `json:"silent"`
+	DrawReleased    bool                        `json:"draw_released"`
+	ResultsReleased bool                        `json:"results_released"`
+	DebateID        string                      `json:"debate_id"`
+	Venue           string                      `json:"venue"`
+	Role            string                      `json:"role"`
+	Teams           []TeamTrajectoryOpponent    `json:"teams"`
+	CoAdjudicators  []TeamTrajectoryAdjudicator `json:"co_adjudicators"`
+	BallotStatus    *string                     `json:"ballot_status,omitempty"`
+}
+
+// AdjudicatorTrajectory represents an adjudicator's full judging history.
+type AdjudicatorTrajectory struct {
+	Adjudicator Adjudicator                   `json:"adjudicator"`
+	Debates     []AdjudicatorTrajectoryDebate `json:"debates"`
 }

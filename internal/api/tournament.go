@@ -483,7 +483,7 @@ type SubmitBallotRequest struct {
 }
 
 // validateBallotRequest enforces score scale and split/consensus rules on a ballot payload.
-func validateBallotRequest(req *SubmitBallotRequest, scoreMin, scoreMax float64) error {
+func validateBallotRequest(req *SubmitBallotRequest, scoreMin, scoreMax, replyMin, replyMax float64) error {
 	if len(req.Results) == 0 {
 		return errors.New("results are required")
 	}
@@ -492,11 +492,31 @@ func validateBallotRequest(req *SubmitBallotRequest, scoreMin, scoreMax float64)
 		if res.Points < 0 {
 			return errors.New("points must be >= 0")
 		}
-		if res.SpeakerPoints < scoreMin || res.SpeakerPoints > scoreMax {
-			return fmt.Errorf("speaker score %s out of range [%s,%s]",
-				strconv.FormatFloat(res.SpeakerPoints, 'f', -1, 64),
-				strconv.FormatFloat(scoreMin, 'f', -1, 64),
-				strconv.FormatFloat(scoreMax, 'f', -1, 64))
+		if len(res.SpeakerScores) > 0 {
+			for _, sp := range res.SpeakerScores {
+				if sp.IsReply {
+					if sp.Score < replyMin || sp.Score > replyMax {
+						return fmt.Errorf("reply speaker score %s out of range [%s,%s]",
+							strconv.FormatFloat(sp.Score, 'f', -1, 64),
+							strconv.FormatFloat(replyMin, 'f', -1, 64),
+							strconv.FormatFloat(replyMax, 'f', -1, 64))
+					}
+				} else {
+					if sp.Score < scoreMin || sp.Score > scoreMax {
+						return fmt.Errorf("speaker score %s out of range [%s,%s]",
+							strconv.FormatFloat(sp.Score, 'f', -1, 64),
+							strconv.FormatFloat(scoreMin, 'f', -1, 64),
+							strconv.FormatFloat(scoreMax, 'f', -1, 64))
+					}
+				}
+			}
+		} else {
+			if res.SpeakerPoints < scoreMin || res.SpeakerPoints > scoreMax {
+				return fmt.Errorf("speaker score %s out of range [%s,%s]",
+					strconv.FormatFloat(res.SpeakerPoints, 'f', -1, 64),
+					strconv.FormatFloat(scoreMin, 'f', -1, 64),
+					strconv.FormatFloat(scoreMax, 'f', -1, 64))
+			}
 		}
 		hasAdj := res.AdjudicatorID != nil && *res.AdjudicatorID != ""
 		if !req.IsSplit && hasAdj {
@@ -518,8 +538,11 @@ func validateBallotRequest(req *SubmitBallotRequest, scoreMin, scoreMax float64)
 	return nil
 }
 
-func ballotScoreBounds(tdb db.TournamentStore) (float64, float64) {
+func ballotScoreBounds(tdb db.TournamentStore) (float64, float64, float64, float64) {
 	scoreMin, scoreMax := 0.0, 100.0
+	replyMin, replyMax := 0.0, 100.0
+	hasReplyCustom := false
+
 	if v, err := tdb.GetConfig("score_min"); err == nil {
 		if f, perr := strconv.ParseFloat(v, 64); perr == nil {
 			scoreMin = f
@@ -530,7 +553,22 @@ func ballotScoreBounds(tdb db.TournamentStore) (float64, float64) {
 			scoreMax = f
 		}
 	}
-	return scoreMin, scoreMax
+	if v, err := tdb.GetConfig("reply_score_min"); err == nil {
+		if f, perr := strconv.ParseFloat(v, 64); perr == nil {
+			replyMin = f
+			hasReplyCustom = true
+		}
+	}
+	if v, err := tdb.GetConfig("reply_score_max"); err == nil {
+		if f, perr := strconv.ParseFloat(v, 64); perr == nil {
+			replyMax = f
+			hasReplyCustom = true
+		}
+	}
+	if !hasReplyCustom {
+		replyMin, replyMax = scoreMin/2.0, scoreMax/2.0
+	}
+	return scoreMin, scoreMax, replyMin, replyMax
 }
 
 // SubmitBallot records ballot results for a debate.
@@ -549,8 +587,8 @@ func (api *API) SubmitBallot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scoreMin, scoreMax := ballotScoreBounds(tdb)
-	if verr := validateBallotRequest(&req, scoreMin, scoreMax); verr != nil {
+	scoreMin, scoreMax, replyMin, replyMax := ballotScoreBounds(tdb)
+	if verr := validateBallotRequest(&req, scoreMin, scoreMax, replyMin, replyMax); verr != nil {
 		JSONError(w, verr.Error(), http.StatusBadRequest)
 		return
 	}
@@ -657,10 +695,28 @@ func (api *API) GetRoundBallots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !api.IsAdmin(r) {
+		round, rerr := tdb.GetRound(roundID)
+		if rerr != nil || (!round.ResultsReleased && round.Silent) {
+			JSONResponse(w, []models.BallotSummary{}, http.StatusOK)
+			return
+		}
+	}
+
 	results, err := tdb.GetBallotsForRound(roundID)
 	if err != nil {
 		JSONError(w, "query failed: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	if !api.IsAdmin(r) {
+		var confirmed []models.BallotSummary
+		for _, b := range results {
+			if b.Status == "confirmed" {
+				confirmed = append(confirmed, b)
+			}
+		}
+		results = confirmed
 	}
 
 	JSONResponse(w, results, http.StatusOK)
@@ -692,4 +748,63 @@ func (api *API) GetStandings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	JSONResponse(w, list, http.StatusOK)
+}
+
+// GetSpeakerStandings dynamically computes individual speaker rankings based on confirmed ballots.
+func (api *API) GetSpeakerStandings(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	tdb, err := api.DBMgr.Get(slug)
+	if err != nil {
+		JSONError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	category := strings.TrimSpace(r.URL.Query().Get("category"))
+	trimmedStr := strings.TrimSpace(r.URL.Query().Get("trimmed"))
+	trimmed := trimmedStr == "true" || trimmedStr == "1"
+
+	list, err := tdb.GetSpeakerStandings(category, trimmed, api.IsAdmin(r))
+	if err != nil {
+		JSONError(w, "failed to compute speaker standings: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	JSONResponse(w, list, http.StatusOK)
+}
+
+// GetAdjudicatorStandings dynamically computes adjudicator rankings, debate counts, and feedback statistics.
+func (api *API) GetAdjudicatorStandings(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	tdb, err := api.DBMgr.Get(slug)
+	if err != nil {
+		JSONError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	list, err := tdb.GetAdjudicatorStandings(api.IsAdmin(r))
+	if err != nil {
+		JSONError(w, "failed to compute adjudicator standings: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	JSONResponse(w, list, http.StatusOK)
+}
+
+// GetAdjudicatorTrajectory returns the round-by-round debate history for an individual adjudicator.
+func (api *API) GetAdjudicatorTrajectory(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	adjID := r.PathValue("id")
+	tdb, err := api.DBMgr.Get(slug)
+	if err != nil {
+		JSONError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	traj, err := tdb.GetAdjudicatorTrajectory(adjID, api.IsAdmin(r))
+	if err != nil {
+		JSONError(w, "failed to retrieve adjudicator trajectory: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	JSONResponse(w, traj, http.StatusOK)
 }

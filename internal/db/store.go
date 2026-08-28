@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -27,9 +28,10 @@ type TournamentStore interface {
 	UpsertSpeaker(teamID string, sp models.Speaker) error
 	DeleteTeam(id string) error
 
-	// Config
+	// Config & Format Presets
 	GetConfig(key string) (string, error)
 	SetConfig(key, value string) error
+	ApplyFormatPreset(presetName string) error
 
 	// Break Categories
 	ListBreakCategories() ([]models.BreakCategory, error)
@@ -78,6 +80,8 @@ type TournamentStore interface {
 	// Manual allocations
 	MoveSwapTeamAssignment(assignmentID, targetDebateID string) (roundID string, err error)
 	MoveSwapAdjudicatorAssignment(assignmentID, targetDebateID, role string) (roundID string, err error)
+	AddAdjudicatorToDebate(debateID, adjudicatorID, role string) (roundID string, err error)
+	RemoveAdjudicatorFromDebate(assignmentID string) (roundID string, err error)
 
 	// Ballots & Standings
 	SubmitBallot(debateID, ballotID, submitterType, submitterID, status string, isSplit bool, entryGroup string, results []models.TeamBallotResult) error
@@ -89,6 +93,8 @@ type TournamentStore interface {
 	GetStandings() ([]models.Standing, error)
 	GetStandingsWithPrecedence(precedence []string, filterCategory string) ([]models.Standing, error)
 	GetStandingsWithPrecedenceEx(precedence []string, filterCategory string, includeSilent bool) ([]models.Standing, error)
+	GetSpeakerStandings(category string, trimmed bool, includeSilent bool) ([]models.SpeakerStanding, error)
+	GetAdjudicatorStandings(includeSilent bool) ([]models.AdjudicatorStanding, error)
 
 	// Breaks & Brackets
 	ComputeBreak(categoryID string) (*models.BreakResult, error)
@@ -114,13 +120,33 @@ type TournamentStore interface {
 	ValidateToken(token string) (*models.TokenOwner, error)
 	CanViewRound(roundID string, isAdmin bool) (bool, error)
 
-	// Stats
-	GetStats() (int, int, error) // teamCount, roundCount
+	// Motions & Vetoes
+	ListMotions(roundID string) ([]models.Motion, error)
+	CreateMotion(m models.Motion) error
+	UpdateMotion(m models.Motion) error
+	DeleteMotion(id string) error
+	ReleaseMotions(roundID string, release bool) error
+	GetDebateVetoes(debateID string) ([]models.MotionVeto, error)
+	RecordMotionVeto(debateID, teamID, motionID string, preference int) error
+	GetMotionStatistics() ([]models.MotionStatistics, error)
+
+	// Venues
+	ListVenues() ([]models.Venue, error)
+	CreateVenue(v models.Venue) error
+	UpdateVenue(v models.Venue) error
+	DeleteVenue(id string) error
+	GetAvailableVenuesForRound(roundID string) ([]models.Venue, error)
+	ImportVenues(venues []models.Venue) (int, error)
 
 	// CSV Imports
 	ImportInstitutions(insts []models.Institution) (int, error)
 	ImportTeams(teams []models.TeamImport) (int, error)
 	ImportAdjudicators(adjs []models.AdjudicatorImport) (int, error)
+
+	// Trajectories
+	GetTeamTrajectory(teamID string, isAdmin bool) (*models.TeamTrajectory, error)
+	GetSpeakerTrajectory(speakerID string, isAdmin bool) (*models.SpeakerTrajectory, error)
+	GetAdjudicatorTrajectory(adjID string, isAdmin bool) (*models.AdjudicatorTrajectory, error)
 
 	// Close database connection
 	Close() error
@@ -344,7 +370,7 @@ func (s *SQLTournamentStore) SetConfig(key, value string) error {
 }
 
 func (s *SQLTournamentStore) ListBreakCategories() ([]models.BreakCategory, error) {
-	rows, err := s.db.Query("SELECT id, name, seq, size, base_points FROM break_categories ORDER BY seq ASC, name ASC")
+	rows, err := s.db.Query("SELECT id, name, seq, size, base_points, max_teams_per_institution, rule FROM break_categories ORDER BY seq ASC, name ASC")
 	if err != nil {
 		return nil, err
 	}
@@ -353,8 +379,9 @@ func (s *SQLTournamentStore) ListBreakCategories() ([]models.BreakCategory, erro
 	var list []models.BreakCategory
 	for rows.Next() {
 		var c models.BreakCategory
-		var size, basePoints sql.NullInt64
-		if err := rows.Scan(&c.ID, &c.Name, &c.Seq, &size, &basePoints); err != nil {
+		var size, basePoints, maxInst sql.NullInt64
+		var rule sql.NullString
+		if err := rows.Scan(&c.ID, &c.Name, &c.Seq, &size, &basePoints, &maxInst, &rule); err != nil {
 			return nil, err
 		}
 		if size.Valid {
@@ -365,18 +392,31 @@ func (s *SQLTournamentStore) ListBreakCategories() ([]models.BreakCategory, erro
 			v := int(basePoints.Int64)
 			c.BasePoints = &v
 		}
+		if maxInst.Valid {
+			v := int(maxInst.Int64)
+			c.MaxTeamsPerInstitution = &v
+		}
+		if rule.Valid {
+			c.Rule = &rule.String
+		}
 		list = append(list, c)
 	}
 	return list, nil
 }
 
 func (s *SQLTournamentStore) CreateBreakCategory(c models.BreakCategory) error {
-	_, err := s.db.Exec("INSERT INTO break_categories (id, name, seq, size, base_points) VALUES (?, ?, ?, ?, ?)", c.ID, c.Name, c.Seq, c.Size, c.BasePoints)
+	_, err := s.db.Exec(
+		"INSERT INTO break_categories (id, name, seq, size, base_points, max_teams_per_institution, rule) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		c.ID, c.Name, c.Seq, c.Size, c.BasePoints, c.MaxTeamsPerInstitution, c.Rule,
+	)
 	return err
 }
 
 func (s *SQLTournamentStore) UpdateBreakCategory(c models.BreakCategory) error {
-	res, err := s.db.Exec("UPDATE break_categories SET name = ?, seq = ?, size = ?, base_points = ? WHERE id = ?", c.Name, c.Seq, c.Size, c.BasePoints, c.ID)
+	res, err := s.db.Exec(
+		"UPDATE break_categories SET name = ?, seq = ?, size = ?, base_points = ?, max_teams_per_institution = ?, rule = ? WHERE id = ?",
+		c.Name, c.Seq, c.Size, c.BasePoints, c.MaxTeamsPerInstitution, c.Rule, c.ID,
+	)
 	if err != nil {
 		return err
 	}
@@ -583,7 +623,12 @@ func (s *SQLTournamentStore) UpdateRound(roundID string, silent, drawReleased, r
 }
 
 func (s *SQLTournamentStore) GetRoundDraw(roundID string) ([]models.DebateDraw, error) {
-	rows, err := s.db.Query("SELECT id, venue FROM debates WHERE round_id = ?", roundID)
+	rows, err := s.db.Query(`
+		SELECT d.id, d.venue, COALESCE(v.is_accessible, 0)
+		FROM debates d
+		LEFT JOIN venues v ON d.venue = v.name
+		WHERE d.round_id = ?
+	`, roundID)
 	if err != nil {
 		return nil, err
 	}
@@ -593,7 +638,7 @@ func (s *SQLTournamentStore) GetRoundDraw(roundID string) ([]models.DebateDraw, 
 
 	for rows.Next() {
 		var d models.DebateDraw
-		if err := rows.Scan(&d.ID, &d.Venue); err != nil {
+		if err := rows.Scan(&d.ID, &d.Venue, &d.VenueAccessible); err != nil {
 			return nil, err
 		}
 		d.Teams = []models.TeamAssignment{}
@@ -894,6 +939,30 @@ func (s *SQLTournamentStore) SubmitBallot(debateID, ballotID, submitterType, sub
 		if err != nil {
 			return err
 		}
+
+		for idx, sp := range res.SpeakerScores {
+			if sp.SpeakerID == "" {
+				continue
+			}
+			spID := uuid.New().String()
+			order := sp.SpeechOrder
+			if order <= 0 {
+				order = idx + 1
+			}
+			var roleVal interface{}
+			if sp.Role != "" {
+				roleVal = sp.Role
+			} else {
+				roleVal = nil
+			}
+			_, err = tx.Exec(
+				"INSERT INTO speaker_scores (id, ballot_id, speaker_id, team_id, score, is_reply, speech_order, role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+				spID, ballotID, sp.SpeakerID, res.TeamID, sp.Score, sp.IsReply, order, roleVal,
+			)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	return tx.Commit()
@@ -1090,6 +1159,260 @@ func (s *SQLTournamentStore) GetStandingsWithPrecedenceEx(precedence []string, f
 	return list, nil
 }
 
+// GetSpeakerStandings computes individual speaker rankings based on confirmed substantive ballot scores.
+func (s *SQLTournamentStore) GetSpeakerStandings(category string, trimmed bool, includeSilent bool) ([]models.SpeakerStanding, error) {
+	rows, err := s.db.Query(`
+		SELECT s.id, s.name, s.team_id, t.name, COALESCE(i.code, ''),
+		       COALESCE(s.is_novice, 0), COALESCE(s.is_esl, 0), COALESCE(s.is_efl, 0),
+		       COALESCE(t.is_novice, 0), COALESCE(t.is_esl, 0), COALESCE(t.is_efl, 0)
+		FROM speakers s
+		JOIN teams t ON s.team_id = t.id
+		LEFT JOIN institutions i ON t.institution_id = i.id
+		ORDER BY s.name ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type spMeta struct {
+		id, name, teamID, teamName, instCode string
+		isNovice, isEsl, isEfl               bool
+		tNovice, tEsl, tEfl                  bool
+	}
+	var speakers []spMeta
+	for rows.Next() {
+		var sm spMeta
+		if err := rows.Scan(&sm.id, &sm.name, &sm.teamID, &sm.teamName, &sm.instCode,
+			&sm.isNovice, &sm.isEsl, &sm.isEfl,
+			&sm.tNovice, &sm.tEsl, &sm.tEfl); err != nil {
+			return nil, err
+		}
+		speakers = append(speakers, sm)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	cat := strings.ToLower(strings.TrimSpace(category))
+	var filtered []spMeta
+	for _, sm := range speakers {
+		match := false
+		switch cat {
+		case "", "all", "open":
+			match = true
+		case "novice":
+			match = sm.isNovice || sm.tNovice
+		case "esl":
+			match = sm.isEsl || sm.tEsl
+		case "efl":
+			match = sm.isEfl || sm.tEfl
+		default:
+			match = true
+		}
+		if match {
+			filtered = append(filtered, sm)
+		}
+	}
+
+	scoreRows, err := s.db.Query(`
+		SELECT ss.speaker_id, ss.score
+		FROM speaker_scores ss
+		JOIN ballots b ON ss.ballot_id = b.id
+		JOIN rounds r ON b.round_id = r.id
+		WHERE b.status = 'confirmed' AND (ss.is_reply = 0 OR ss.is_reply IS NULL) AND (? OR r.silent = 0 OR r.results_released = 1)
+		ORDER BY ss.speaker_id, ss.score ASC
+	`, includeSilent)
+	if err != nil {
+		return nil, err
+	}
+	defer scoreRows.Close()
+
+	scoresBySpeaker := make(map[string][]float64)
+	for scoreRows.Next() {
+		var spID string
+		var sc float64
+		if err := scoreRows.Scan(&spID, &sc); err != nil {
+			return nil, err
+		}
+		scoresBySpeaker[spID] = append(scoresBySpeaker[spID], sc)
+	}
+	if err := scoreRows.Err(); err != nil {
+		return nil, err
+	}
+
+	standings := make([]models.SpeakerStanding, 0, len(filtered))
+	for _, sm := range filtered {
+		scores := scoresBySpeaker[sm.id]
+		sort.Float64s(scores)
+		count := len(scores)
+		total := 0.0
+		for _, sc := range scores {
+			total += sc
+		}
+		avg := 0.0
+		if count > 0 {
+			avg = total / float64(count)
+		}
+		trimmedScore := avg
+		if count >= 3 {
+			trimmedSum := 0.0
+			for k := 1; k < count-1; k++ {
+				trimmedSum += scores[k]
+			}
+			trimmedScore = trimmedSum / float64(count-2)
+		}
+
+		standings = append(standings, models.SpeakerStanding{
+			SpeakerID:       sm.id,
+			SpeakerName:     sm.name,
+			TeamID:          sm.teamID,
+			TeamName:        sm.teamName,
+			InstitutionCode: sm.instCode,
+			TotalScore:      total,
+			AverageScore:    avg,
+			TrimmedScore:    trimmedScore,
+			SpeechCount:     count,
+			IsNovice:        sm.isNovice || sm.tNovice,
+			IsEsl:           sm.isEsl || sm.tEsl,
+			IsEfl:           sm.isEfl || sm.tEfl,
+		})
+	}
+
+	if trimmed {
+		sort.Slice(standings, func(i, j int) bool {
+			if standings[i].TrimmedScore != standings[j].TrimmedScore {
+				return standings[i].TrimmedScore > standings[j].TrimmedScore
+			}
+			if standings[i].TotalScore != standings[j].TotalScore {
+				return standings[i].TotalScore > standings[j].TotalScore
+			}
+			if standings[i].AverageScore != standings[j].AverageScore {
+				return standings[i].AverageScore > standings[j].AverageScore
+			}
+			return standings[i].SpeakerName < standings[j].SpeakerName
+		})
+	} else {
+		sort.Slice(standings, func(i, j int) bool {
+			if standings[i].TotalScore != standings[j].TotalScore {
+				return standings[i].TotalScore > standings[j].TotalScore
+			}
+			if standings[i].AverageScore != standings[j].AverageScore {
+				return standings[i].AverageScore > standings[j].AverageScore
+			}
+			if standings[i].TrimmedScore != standings[j].TrimmedScore {
+				return standings[i].TrimmedScore > standings[j].TrimmedScore
+			}
+			return standings[i].SpeakerName < standings[j].SpeakerName
+		})
+	}
+
+	for i := range standings {
+		standings[i].Rank = i + 1
+	}
+
+	return standings, nil
+}
+
+type FormatPresetConfig struct {
+	Sides             string
+	ScoreMin          float64
+	ScoreMax          float64
+	SpeakersPerTeam   int
+	HasReplySpeeches  bool
+	ReplyScoreMin     float64
+	ReplyScoreMax     float64
+	RankingPrecedence []string
+}
+
+var FormatPresets = map[string]FormatPresetConfig{
+	"bp": {
+		Sides:             "OG,OO,CG,CO",
+		ScoreMin:          50,
+		ScoreMax:          100,
+		SpeakersPerTeam:   2,
+		HasReplySpeeches:  false,
+		ReplyScoreMin:     0,
+		ReplyScoreMax:     0,
+		RankingPrecedence: []string{"points", "speaker_points", "margin"},
+	},
+	"australs": {
+		Sides:             "Aff,Neg",
+		ScoreMin:          65,
+		ScoreMax:          85,
+		SpeakersPerTeam:   3,
+		HasReplySpeeches:  true,
+		ReplyScoreMin:     30,
+		ReplyScoreMax:     45,
+		RankingPrecedence: []string{"points", "speaker_points", "margin"},
+	},
+	"asians": {
+		Sides:             "Gov,Opp",
+		ScoreMin:          65,
+		ScoreMax:          85,
+		SpeakersPerTeam:   3,
+		HasReplySpeeches:  true,
+		ReplyScoreMin:     30,
+		ReplyScoreMax:     45,
+		RankingPrecedence: []string{"points", "margin", "speaker_points"},
+	},
+	"wsdc": {
+		Sides:             "Prop,Opp",
+		ScoreMin:          60,
+		ScoreMax:          80,
+		SpeakersPerTeam:   3,
+		HasReplySpeeches:  true,
+		ReplyScoreMin:     30,
+		ReplyScoreMax:     40,
+		RankingPrecedence: []string{"points", "speaker_points", "margin"},
+	},
+	"apda": {
+		Sides:             "Gov,Opp",
+		ScoreMin:          20,
+		ScoreMax:          30,
+		SpeakersPerTeam:   2,
+		HasReplySpeeches:  false,
+		ReplyScoreMin:     0,
+		ReplyScoreMax:     0,
+		RankingPrecedence: []string{"points", "speaker_points", "margin"},
+	},
+}
+
+func (s *SQLTournamentStore) ApplyFormatPreset(presetName string) error {
+	p := strings.ToLower(strings.TrimSpace(presetName))
+	if p == "uadc" {
+		p = "asians"
+	}
+	preset, ok := FormatPresets[p]
+	if !ok {
+		return fmt.Errorf("unknown format preset: %s (supported: bp, australs, asians, wsdc, apda)", presetName)
+	}
+
+	precBytes, err := json.Marshal(preset.RankingPrecedence)
+	if err != nil {
+		return err
+	}
+
+	configs := map[string]string{
+		"preset":             p,
+		"sides":              preset.Sides,
+		"score_min":          fmt.Sprintf("%.1f", preset.ScoreMin),
+		"score_max":          fmt.Sprintf("%.1f", preset.ScoreMax),
+		"speakers_per_team":  fmt.Sprintf("%d", preset.SpeakersPerTeam),
+		"has_reply_speeches": fmt.Sprintf("%t", preset.HasReplySpeeches),
+		"reply_score_min":    fmt.Sprintf("%.1f", preset.ReplyScoreMin),
+		"reply_score_max":    fmt.Sprintf("%.1f", preset.ReplyScoreMax),
+		"ranking_precedence": string(precBytes),
+	}
+
+	for k, v := range configs {
+		if err := s.SetConfig(k, v); err != nil {
+			return fmt.Errorf("failed to set config %s: %w", k, err)
+		}
+	}
+	return nil
+}
+
 func (s *SQLTournamentStore) ResolveToken(token string) (*models.TokenInfo, error) {
 	var tType, ownerID string
 	err := s.db.QueryRow("SELECT type, owner_id FROM access_tokens WHERE token = ?", token).Scan(&tType, &ownerID)
@@ -1098,8 +1421,19 @@ func (s *SQLTournamentStore) ResolveToken(token string) (*models.TokenInfo, erro
 	}
 
 	var name string
+	var speakers []models.Speaker
 	if tType == "team" {
 		_ = s.db.QueryRow("SELECT name FROM teams WHERE id = ?", ownerID).Scan(&name)
+		spRows, err := s.db.Query("SELECT id, name, is_novice, is_esl, is_efl FROM speakers WHERE team_id = ? ORDER BY name ASC", ownerID)
+		if err == nil {
+			for spRows.Next() {
+				var sp models.Speaker
+				if err := spRows.Scan(&sp.ID, &sp.Name, &sp.IsNovice, &sp.IsEsl, &sp.IsEfl); err == nil {
+					speakers = append(speakers, sp)
+				}
+			}
+			spRows.Close()
+		}
 	} else if tType == "adjudicator" {
 		_ = s.db.QueryRow("SELECT name FROM adjudicators WHERE id = ?", ownerID).Scan(&name)
 	}
@@ -1108,6 +1442,7 @@ func (s *SQLTournamentStore) ResolveToken(token string) (*models.TokenInfo, erro
 		Type:      tType,
 		OwnerID:   ownerID,
 		OwnerName: name,
+		Speakers:  speakers,
 	}, nil
 }
 
@@ -1116,7 +1451,8 @@ func (s *SQLTournamentStore) GetTokenDebates(ownerID, ownerType string) ([]model
 
 	if ownerType == "adjudicator" {
 		rows, err := s.db.Query(`
-			SELECT d.id, d.venue, r.name, r.seq, da.role, COALESCE(b.status, 'unsubmitted')
+			SELECT d.id, d.venue, r.name, r.seq, da.role, COALESCE(b.status, 'unsubmitted'),
+			       COALESCE((SELECT text FROM motions WHERE round_id = r.id ORDER BY seq ASC LIMIT 1), '')
 			FROM debates d
 			JOIN debate_adjudicators da ON d.id = da.debate_id
 			JOIN rounds r ON d.round_id = r.id
@@ -1131,15 +1467,22 @@ func (s *SQLTournamentStore) GetTokenDebates(ownerID, ownerType string) ([]model
 
 		for rows.Next() {
 			var d models.DebateInfo
-			if err := rows.Scan(&d.ID, &d.Venue, &d.RoundName, &d.RoundSeq, &d.Role, &d.BallotStatus); err != nil {
+			var motionText string
+			if err := rows.Scan(&d.ID, &d.Venue, &d.RoundName, &d.RoundSeq, &d.Role, &d.BallotStatus, &motionText); err != nil {
 				return nil, err
 			}
+			d.Motion = motionText
 			d.Teams = []models.TeamAssignment{}
+			d.Adjudicators = []string{}
+			d.Panellists = []string{}
 			debates = append(debates, d)
 		}
 	} else if ownerType == "team" {
 		rows, err := s.db.Query(`
-			SELECT d.id, d.venue, r.name, r.seq, dt.side, r.results_released, COALESCE(br.points, -1), COALESCE(br.speaker_points, -1.0)
+			SELECT d.id, d.venue, r.name, r.seq, dt.side, r.results_released,
+			       COALESCE(br.points, -1), COALESCE(br.speaker_points, -1.0),
+			       COALESCE(b.status, ''),
+			       COALESCE((SELECT text FROM motions WHERE round_id = r.id AND (released_at IS NOT NULL OR r.draw_released = 1) ORDER BY seq ASC LIMIT 1), '')
 			FROM debates d
 			JOIN debate_teams dt ON d.id = dt.debate_id
 			JOIN rounds r ON d.round_id = r.id
@@ -1158,33 +1501,102 @@ func (s *SQLTournamentStore) GetTokenDebates(ownerID, ownerType string) ([]model
 			var resultsReleased bool
 			var pts int
 			var spPts float64
-			if err := rows.Scan(&d.ID, &d.Venue, &d.RoundName, &d.RoundSeq, &d.Side, &resultsReleased, &pts, &spPts); err != nil {
+			var bStatus string
+			var motionText string
+			if err := rows.Scan(&d.ID, &d.Venue, &d.RoundName, &d.RoundSeq, &d.Side, &resultsReleased, &pts, &spPts, &bStatus, &motionText); err != nil {
 				return nil, err
 			}
 			if resultsReleased && pts != -1 {
 				d.Points = &pts
 				d.SpeakerPoints = &spPts
 			}
+			d.BallotStatus = bStatus
+			d.Motion = motionText
 			d.Teams = []models.TeamAssignment{}
+			d.Adjudicators = []string{}
+			d.Panellists = []string{}
 			debates = append(debates, d)
 		}
 	}
 
 	for idx := range debates {
+		var teamList []models.TeamAssignment
 		tRows, err := s.db.Query(`
 			SELECT dt.team_id, t.name, dt.side
 			FROM debate_teams dt
 			JOIN teams t ON dt.team_id = t.id
 			WHERE dt.debate_id = ?
+			ORDER BY dt.side ASC
 		`, debates[idx].ID)
 		if err == nil {
 			for tRows.Next() {
 				var ta models.TeamAssignment
 				if err := tRows.Scan(&ta.TeamID, &ta.TeamName, &ta.Side); err == nil {
-					debates[idx].Teams = append(debates[idx].Teams, ta)
+					teamList = append(teamList, ta)
 				}
 			}
 			tRows.Close()
+
+			for tIdx := range teamList {
+				spRows, spErr := s.db.Query(`
+					SELECT id, name, is_novice, is_esl, is_efl
+					FROM speakers
+					WHERE team_id = ?
+					ORDER BY name ASC
+				`, teamList[tIdx].TeamID)
+				if spErr == nil {
+					for spRows.Next() {
+						var sp models.Speaker
+						if err := spRows.Scan(&sp.ID, &sp.Name, &sp.IsNovice, &sp.IsEsl, &sp.IsEfl); err == nil {
+							teamList[tIdx].Speakers = append(teamList[tIdx].Speakers, sp)
+						}
+					}
+					spRows.Close()
+				}
+			}
+			debates[idx].Teams = teamList
+		}
+
+		aRows, aErr := s.db.Query(`
+			SELECT a.name, da.role
+			FROM debate_adjudicators da
+			JOIN adjudicators a ON da.adjudicator_id = a.id
+			WHERE da.debate_id = ?
+			ORDER BY CASE da.role WHEN 'chair' THEN 1 WHEN 'panel' THEN 2 ELSE 3 END
+		`, debates[idx].ID)
+		if aErr == nil {
+			for aRows.Next() {
+				var aName, aRole string
+				if err := aRows.Scan(&aName, &aRole); err == nil {
+					if aRole == "chair" && debates[idx].Chair == "" {
+						debates[idx].Chair = aName
+					} else {
+						debates[idx].Panellists = append(debates[idx].Panellists, aName)
+					}
+					debates[idx].Adjudicators = append(debates[idx].Adjudicators, aName)
+				}
+			}
+			aRows.Close()
+		}
+
+		if ownerType == "team" && debates[idx].Points != nil {
+			ssRows, ssErr := s.db.Query(`
+				SELECT ss.id, ss.ballot_id, ss.speaker_id, s.name, ss.team_id, ss.score, ss.is_reply, ss.speech_order, COALESCE(ss.role, '')
+				FROM speaker_scores ss
+				JOIN ballots b ON ss.ballot_id = b.id
+				JOIN speakers s ON ss.speaker_id = s.id
+				WHERE b.debate_id = ? AND ss.team_id = ? AND b.status = 'confirmed'
+				ORDER BY ss.speech_order ASC, ss.is_reply ASC
+			`, debates[idx].ID, ownerID)
+			if ssErr == nil {
+				for ssRows.Next() {
+					var ss models.SpeakerScore
+					if err := ssRows.Scan(&ss.ID, &ss.BallotID, &ss.SpeakerID, &ss.SpeakerName, &ss.TeamID, &ss.Score, &ss.IsReply, &ss.SpeechOrder, &ss.Role); err == nil {
+						debates[idx].SpeakerScores = append(debates[idx].SpeakerScores, ss)
+					}
+				}
+				ssRows.Close()
+			}
 		}
 	}
 

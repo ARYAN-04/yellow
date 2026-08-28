@@ -58,8 +58,29 @@ CREATE TABLE IF NOT EXISTS rounds (
 
 CREATE TABLE IF NOT EXISTS motions (
 	id TEXT PRIMARY KEY,
+	round_id TEXT REFERENCES rounds(id) ON DELETE CASCADE,
+	seq INTEGER NOT NULL DEFAULT 1,
+	reference TEXT,
 	text TEXT NOT NULL,
-	round_id TEXT REFERENCES rounds(id) ON DELETE CASCADE
+	info_slide TEXT,
+	released_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS motion_vetoes (
+	id TEXT PRIMARY KEY,
+	debate_id TEXT REFERENCES debates(id) ON DELETE CASCADE,
+	team_id TEXT REFERENCES teams(id) ON DELETE CASCADE,
+	motion_id TEXT REFERENCES motions(id) ON DELETE CASCADE,
+	preference INTEGER NOT NULL,
+	UNIQUE(debate_id, team_id, motion_id)
+);
+
+CREATE TABLE IF NOT EXISTS venues (
+	id TEXT PRIMARY KEY,
+	name TEXT UNIQUE NOT NULL,
+	priority INTEGER NOT NULL DEFAULT 0,
+	category_id TEXT,
+	is_accessible BOOLEAN NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS debates (
@@ -133,7 +154,20 @@ CREATE TABLE IF NOT EXISTS break_categories (
 	name TEXT UNIQUE NOT NULL,
 	seq INTEGER NOT NULL DEFAULT 0,
 	size INTEGER,
-	base_points INTEGER
+	base_points INTEGER,
+	max_teams_per_institution INTEGER,
+	rule TEXT
+);
+
+CREATE TABLE IF NOT EXISTS speaker_scores (
+	id TEXT PRIMARY KEY,
+	ballot_id TEXT REFERENCES ballots(id) ON DELETE CASCADE,
+	speaker_id TEXT REFERENCES speakers(id) ON DELETE CASCADE,
+	team_id TEXT REFERENCES teams(id) ON DELETE CASCADE,
+	score REAL NOT NULL,
+	is_reply BOOLEAN DEFAULT 0,
+	speech_order INTEGER DEFAULT 1,
+	role TEXT
 );
 
 CREATE TABLE IF NOT EXISTS feedback_questions (
@@ -217,6 +251,13 @@ var columnMigrations = []string{
 	"ALTER TABLE ballot_results ADD COLUMN adjudicator_id TEXT REFERENCES adjudicators(id) ON DELETE CASCADE",
 	"ALTER TABLE adjudicators ADD COLUMN rating REAL",
 	"ALTER TABLE debates ADD COLUMN bracket_position INTEGER",
+	"ALTER TABLE break_categories ADD COLUMN max_teams_per_institution INTEGER",
+	"ALTER TABLE break_categories ADD COLUMN rule TEXT",
+	"ALTER TABLE motions ADD COLUMN seq INTEGER DEFAULT 1",
+	"ALTER TABLE motions ADD COLUMN reference TEXT",
+	"ALTER TABLE motions ADD COLUMN info_slide TEXT",
+	"ALTER TABLE motions ADD COLUMN released_at TIMESTAMP",
+	"ALTER TABLE speaker_scores ADD COLUMN role TEXT",
 }
 
 // applyColumnMigrations runs column migrations, tolerating already-applied ones.

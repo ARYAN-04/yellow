@@ -199,32 +199,55 @@ export default function LandingPage() {
       {tournaments.length > 0 && (
         <div className="card">
           <h2>Tournament Records</h2>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.85rem', marginTop: '1rem' }}>
             {tournaments.map((t: any) => (
-              <Link
+              <div
                 key={t.slug}
-                to={`/t/${t.slug}/admin`}
                 style={{
                   display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  padding: '1rem',
-                  background: 'rgba(0,0,0,0.02)',
+                  flexDirection: 'column',
+                  gap: '0.6rem',
+                  padding: '1rem 1.25rem',
+                  background: 'rgba(0,0,0,0.01)',
                   border: '1px solid var(--border)',
                   borderRadius: '8px',
-                  color: 'var(--text-h)'
                 }}
               >
-                <span>{t.name}</span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  {t.is_archived ? (
-                    <span className="badge badge-success" style={{ fontSize: '0.7rem' }}>Archived</span>
-                  ) : (
-                    <span className="badge badge-info" style={{ fontSize: '0.7rem' }}>Active</span>
-                  )}
-                  <span style={{ fontSize: '0.8rem', color: 'var(--text-mute)' }}>/t/{t.slug}/admin</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Link
+                    to={`/t/${t.slug}/admin`}
+                    style={{ fontWeight: 700, fontSize: '1.05rem', color: 'var(--text-h)', textDecoration: 'none' }}
+                  >
+                    {t.name}
+                  </Link>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    {t.is_archived ? (
+                      <span className="badge badge-success" style={{ fontSize: '0.7rem' }}>Archived</span>
+                    ) : (
+                      <span className="badge badge-info" style={{ fontSize: '0.7rem' }}>Active</span>
+                    )}
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-mute)' }}>/{t.slug}</span>
+                  </div>
                 </div>
-              </Link>
+
+                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                  <Link to={`/t/${t.slug}/standings`} className="btn btn-secondary" style={{ padding: '3px 8px', fontSize: '0.75rem' }}>
+                    Standings
+                  </Link>
+                  <Link to={`/t/${t.slug}/results`} className="btn btn-secondary" style={{ padding: '3px 8px', fontSize: '0.75rem' }}>
+                    Results
+                  </Link>
+                  <Link to={`/t/${t.slug}/draw`} className="btn btn-secondary" style={{ padding: '3px 8px', fontSize: '0.75rem' }}>
+                    Draw
+                  </Link>
+                  <Link to={`/t/${t.slug}/motions`} className="btn btn-secondary" style={{ padding: '3px 8px', fontSize: '0.75rem' }}>
+                    Motions
+                  </Link>
+                  <Link to={`/t/${t.slug}/admin`} className="btn btn-primary" style={{ padding: '3px 10px', fontSize: '0.75rem', marginLeft: 'auto' }}>
+                    Admin Workspace →
+                  </Link>
+                </div>
+              </div>
             ))}
           </div>
         </div>

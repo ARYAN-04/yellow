@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 
 	"yellow/internal/models"
@@ -366,4 +367,151 @@ func (s *SQLTournamentStore) RecalcAdjudicatorRatings() error {
 		WHERE (SELECT COUNT(*) FROM feedback_submissions fs WHERE fs.target_adjudicator_id = adjudicators.id) = 0
 	`)
 	return err
+}
+
+// GetAdjudicatorStandings computes adjudicator rankings, debate role metrics, and feedback statistics.
+func (s *SQLTournamentStore) GetAdjudicatorStandings(includeSilent bool) ([]models.AdjudicatorStanding, error) {
+	rows, err := s.db.Query(`
+		SELECT a.id, a.name, a.institution_id, i.name, i.code, a.test_score, a.rating
+		FROM adjudicators a
+		LEFT JOIN institutions i ON a.institution_id = i.id
+		ORDER BY a.name ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type adjMeta struct {
+		id, name                   string
+		instID, instName, instCode sql.NullString
+		testScore                  float64
+		rating                     sql.NullFloat64
+	}
+	var adjs []adjMeta
+	for rows.Next() {
+		var am adjMeta
+		if err := rows.Scan(&am.id, &am.name, &am.instID, &am.instName, &am.instCode, &am.testScore, &am.rating); err != nil {
+			return nil, err
+		}
+		adjs = append(adjs, am)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Count debates by role for each adjudicator
+	roleCounts := make(map[string]map[string]int)
+	rRows, err := s.db.Query(`
+		SELECT da.adjudicator_id, da.role, COUNT(da.id)
+		FROM debate_adjudicators da
+		JOIN debates d ON da.debate_id = d.id
+		JOIN rounds r ON d.round_id = r.id
+		WHERE (? OR r.silent = 0 OR r.draw_released = 1)
+		GROUP BY da.adjudicator_id, da.role
+	`, includeSilent)
+	if err != nil {
+		return nil, err
+	}
+	defer rRows.Close()
+	for rRows.Next() {
+		var adjID, role string
+		var cnt int
+		if err := rRows.Scan(&adjID, &role, &cnt); err != nil {
+			return nil, err
+		}
+		if _, ok := roleCounts[adjID]; !ok {
+			roleCounts[adjID] = make(map[string]int)
+		}
+		roleCounts[adjID][role] = cnt
+	}
+
+	// Calculate feedback submission stats for each adjudicator
+	type fbStats struct {
+		avgScore float64
+		count    int
+	}
+	fbMap := make(map[string]fbStats)
+	fRows, err := s.db.Query(`
+		SELECT fs.target_adjudicator_id, AVG(fs.score), COUNT(fs.id)
+		FROM feedback_submissions fs
+		JOIN rounds r ON fs.round_id = r.id
+		WHERE fs.score IS NOT NULL AND (? OR r.silent = 0 OR r.results_released = 1)
+		GROUP BY fs.target_adjudicator_id
+	`, includeSilent)
+	if err != nil {
+		return nil, err
+	}
+	defer fRows.Close()
+	for fRows.Next() {
+		var adjID string
+		var avg sql.NullFloat64
+		var cnt int
+		if err := fRows.Scan(&adjID, &avg, &cnt); err != nil {
+			return nil, err
+		}
+		if avg.Valid {
+			fbMap[adjID] = fbStats{avgScore: avg.Float64, count: cnt}
+		}
+	}
+
+	standings := make([]models.AdjudicatorStanding, 0, len(adjs))
+	for _, am := range adjs {
+		st := models.AdjudicatorStanding{
+			ID:        am.id,
+			Name:      am.name,
+			TestScore: am.testScore,
+		}
+		if am.instID.Valid && am.instID.String != "" {
+			st.InstitutionID = &am.instID.String
+		}
+		if am.instName.Valid && am.instName.String != "" {
+			st.InstitutionName = &am.instName.String
+		}
+		if am.instCode.Valid && am.instCode.String != "" {
+			st.InstitutionCode = &am.instCode.String
+		}
+		if am.rating.Valid {
+			st.FeedbackRating = &am.rating.Float64
+		}
+
+		if roles, ok := roleCounts[am.id]; ok {
+			st.ChairsCount = roles["chair"]
+			st.PanelsCount = roles["panel"]
+			st.TraineesCount = roles["trainee"]
+			st.DebatesCount = st.ChairsCount + st.PanelsCount + st.TraineesCount
+		}
+
+		if fb, ok := fbMap[am.id]; ok {
+			st.AverageFeedbackScore = &fb.avgScore
+			st.FeedbackCount = fb.count
+		}
+
+		standings = append(standings, st)
+	}
+
+	// Sort by effective rating DESC, then debates count DESC, then name ASC
+	sort.SliceStable(standings, func(i, j int) bool {
+		rI := standings[i].TestScore
+		if standings[i].FeedbackRating != nil {
+			rI = *standings[i].FeedbackRating
+		}
+		rJ := standings[j].TestScore
+		if standings[j].FeedbackRating != nil {
+			rJ = *standings[j].FeedbackRating
+		}
+		if rI != rJ {
+			return rI > rJ
+		}
+		if standings[i].DebatesCount != standings[j].DebatesCount {
+			return standings[i].DebatesCount > standings[j].DebatesCount
+		}
+		return standings[i].Name < standings[j].Name
+	})
+
+	for i := range standings {
+		standings[i].Rank = i + 1
+	}
+
+	return standings, nil
 }

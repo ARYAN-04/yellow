@@ -25,6 +25,8 @@ export async function fetchAPI(url: string, method = 'GET', body: any = null, is
 export interface AdminContext {
   slug: string;
   isReadOnly: boolean;
+  role?: string;
+  isAssistant?: boolean;
 }
 
 export interface RoundContext extends AdminContext {

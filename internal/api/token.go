@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 
 	"yellow/internal/models"
@@ -20,17 +19,20 @@ func (api *API) resolveTokenHelper(token string) (*models.TokenInfo, error) {
 		return nil, fmt.Errorf("token cannot be empty")
 	}
 
-	files, err := os.ReadDir("tournaments")
+	rows, err := api.GlobalDB.Query("SELECT slug FROM tournaments")
 	if err != nil {
-		return nil, fmt.Errorf("failed to read tournaments directory: %w", err)
+		return nil, fmt.Errorf("failed to query tournaments: %w", err)
 	}
-
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".db") || file.Name() == "global.db" {
-			continue
+	var slugs []string
+	for rows.Next() {
+		var slug string
+		if err := rows.Scan(&slug); err == nil {
+			slugs = append(slugs, slug)
 		}
+	}
+	rows.Close()
 
-		slug := strings.TrimSuffix(file.Name(), ".db")
+	for _, slug := range slugs {
 		tdb, err := api.DBMgr.Get(slug)
 		if err != nil {
 			continue
@@ -109,6 +111,12 @@ func (api *API) SubmitTokenBallot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	scoreMin, scoreMax, replyMin, replyMax := ballotScoreBounds(tdb)
+	if err := validateBallotRequest(&req, scoreMin, scoreMax, replyMin, replyMax); err != nil {
+		JSONError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	ballotID := uuid.New().String()
 	err = tdb.SubmitTokenBallot(debateID, ballotID, info.OwnerID, req.Results)
 	if err != nil {
@@ -123,4 +131,103 @@ func (api *API) SubmitTokenBallot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	JSONResponse(w, map[string]string{"id": ballotID, "status": "submitted"}, http.StatusCreated)
+}
+
+// GetTokenCheckin handles GET /api/token/{token}/checkin
+func (api *API) GetTokenCheckin(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	info, err := api.resolveTokenHelper(token)
+	if err != nil {
+		JSONError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	tdb, err := api.DBMgr.Get(info.Slug)
+	if err != nil {
+		JSONError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	checkins, err := tdb.ListCheckins()
+	if err != nil {
+		JSONError(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	isCheckedIn := false
+	for _, c := range checkins {
+		if c.EntityType == info.Type && c.EntityID == info.OwnerID {
+			isCheckedIn = c.CheckedIn
+			break
+		}
+	}
+
+	checkedAtStr := ""
+	if isCheckedIn {
+		checkedAtStr = "Checked In"
+	}
+
+	JSONResponse(w, map[string]interface{}{
+		"checked_in":    isCheckedIn,
+		"checked_in_at": checkedAtStr,
+		"entity_type":   info.Type,
+		"entity_name":   info.OwnerName,
+	}, http.StatusOK)
+}
+
+// SetTokenCheckin handles POST /api/token/{token}/checkin
+func (api *API) SetTokenCheckin(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	info, err := api.resolveTokenHelper(token)
+	if err != nil {
+		JSONError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	tdb, err := api.DBMgr.Get(info.Slug)
+	if err != nil {
+		JSONError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	checkins, err := tdb.ListCheckins()
+	if err != nil {
+		JSONError(w, "query failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	currentCheckedIn := false
+	for _, c := range checkins {
+		if c.EntityType == info.Type && c.EntityID == info.OwnerID {
+			currentCheckedIn = c.CheckedIn
+			break
+		}
+	}
+
+	targetCheckedIn := !currentCheckedIn
+	var req struct {
+		CheckedIn *bool `json:"checked_in"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.CheckedIn != nil {
+			targetCheckedIn = *req.CheckedIn
+		}
+	}
+
+	if err := tdb.SetCheckedIn(info.Type, info.OwnerID, targetCheckedIn); err != nil {
+		JSONError(w, "checkin update failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	checkedAtStr := ""
+	if targetCheckedIn {
+		checkedAtStr = "Checked In"
+	}
+
+	JSONResponse(w, map[string]interface{}{
+		"checked_in":    targetCheckedIn,
+		"checked_in_at": checkedAtStr,
+		"entity_type":   info.Type,
+		"entity_name":   info.OwnerName,
+	}, http.StatusOK)
 }

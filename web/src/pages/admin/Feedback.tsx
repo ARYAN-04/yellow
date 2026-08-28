@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useOutletContext } from 'react-router-dom';
 import { Plus, Trash2, Pencil, ArrowUp, ArrowDown, ChevronDown, ChevronUp } from 'lucide-react';
-import { fetchAPI } from '../../lib/api';
+import { fetchAPI, type AdminContext } from '../../lib/api';
 
 const questionTypes = ['scale', 'text', 'checkbox', 'select'];
 
 export default function Feedback() {
   const { slug } = useParams<{ slug: string }>();
+  const { isReadOnly, isAssistant } = useOutletContext<AdminContext>();
+  const isRestricted = isReadOnly || isAssistant;
 
   const [tab, setTab] = useState<'builder' | 'submissions'>('builder');
 
@@ -133,48 +135,50 @@ export default function Feedback() {
 
       {tab === 'builder' && (
         <>
-          <form onSubmit={handleSave} className="card" style={{ maxWidth: '720px', marginBottom: '1.25rem' }}>
-            <h3>{editingId ? 'Edit Question' : 'Add Question'}</h3>
-            <div className="form-group">
-              <label className="label">Question Name</label>
-              <input className="input" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Adjudicator rating" />
-            </div>
-            <div className="grid grid-cols-2" style={{ gap: '0.75rem' }}>
+          {!isRestricted && (
+            <form onSubmit={handleSave} className="card" style={{ maxWidth: '720px', marginBottom: '1.25rem' }}>
+              <h3>{editingId ? 'Edit Question' : 'Add Question'}</h3>
               <div className="form-group">
-                <label className="label">Type</label>
-                <select className="input select" value={type} onChange={e => setType(e.target.value)}>
-                  {questionTypes.map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
+                <label className="label">Question Name</label>
+                <input className="input" value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Adjudicator rating" />
               </div>
-              <div className="form-group">
-                <label className="label">Evaluated By</label>
-                <select className="input select" value={fromType} onChange={e => setFromType(e.target.value)}>
-                  <option value="team">Teams</option>
-                  <option value="adjudicator">Adjudicators</option>
-                </select>
+              <div className="grid grid-cols-2" style={{ gap: '0.75rem' }}>
+                <div className="form-group">
+                  <label className="label">Type</label>
+                  <select className="input select" value={type} onChange={e => setType(e.target.value)}>
+                    {questionTypes.map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label className="label">Evaluated By</label>
+                  <select className="input select" value={fromType} onChange={e => setFromType(e.target.value)}>
+                    <option value="team">Teams</option>
+                    <option value="adjudicator">Adjudicators</option>
+                  </select>
+                </div>
               </div>
-            </div>
-            {(type === 'select' || type === 'scale') && (
-              <div className="form-group">
-                <label className="label">
-                  Options (one per line{type === 'select' ? ', required' : '; optional numeric min/max for scale'})
-                </label>
-                <textarea className="input" rows={type === 'select' ? 4 : 2} value={optionsText} onChange={e => setOptionsText(e.target.value)} placeholder={type === 'select' ? 'Excellent\nGood\nFair\nPoor' : '0\n10'} />
-              </div>
-            )}
-            <div className="form-group">
-              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                <input type="checkbox" checked={required} onChange={e => setRequired(e.target.checked)} />
-                <span>Required</span>
-              </label>
-            </div>
-            <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <button type="submit" className="btn btn-primary"><Plus size={16} /> {editingId ? 'Save Changes' : 'Add Question'}</button>
-              {editingId && (
-                <button type="button" className="btn btn-secondary" onClick={resetForm}>Cancel</button>
+              {(type === 'select' || type === 'scale') && (
+                <div className="form-group">
+                  <label className="label">
+                    Options (one per line{type === 'select' ? ', required' : '; optional numeric min/max for scale'})
+                  </label>
+                  <textarea className="input" rows={type === 'select' ? 4 : 2} value={optionsText} onChange={e => setOptionsText(e.target.value)} placeholder={type === 'select' ? 'Excellent\nGood\nFair\nPoor' : '0\n10'} />
+                </div>
               )}
-            </div>
-          </form>
+              <div className="form-group">
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={required} onChange={e => setRequired(e.target.checked)} />
+                  <span>Required</span>
+                </label>
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button type="submit" className="btn btn-primary"><Plus size={16} /> {editingId ? 'Save Changes' : 'Add Question'}</button>
+                {editingId && (
+                  <button type="button" className="btn btn-secondary" onClick={resetForm}>Cancel</button>
+                )}
+              </div>
+            </form>
+          )}
 
           <div className="card" style={{ maxWidth: '720px' }}>
             <h3>Questions</h3>
@@ -190,12 +194,14 @@ export default function Feedback() {
                       {(q.options || []).length > 0 && ` | options: ${q.options.join(', ')}`}
                     </div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                    <button className="btn btn-secondary" style={{ padding: '2px 8px' }} disabled={i === 0} onClick={() => handleMove(q.id, 'up')} aria-label="Move up"><ArrowUp size={13} /></button>
-                    <button className="btn btn-secondary" style={{ padding: '2px 8px' }} disabled={i === questions.length - 1} onClick={() => handleMove(q.id, 'down')} aria-label="Move down"><ArrowDown size={13} /></button>
-                    <button className="btn btn-secondary" style={{ padding: '2px 8px' }} onClick={() => startEdit(q)}><Pencil size={13} /></button>
-                    <button className="btn btn-danger" style={{ padding: '2px 8px' }} onClick={() => handleDelete(q.id)}><Trash2 size={13} /></button>
-                  </div>
+                  {!isRestricted && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                      <button className="btn btn-secondary" style={{ padding: '2px 8px' }} disabled={i === 0} onClick={() => handleMove(q.id, 'up')} aria-label="Move up"><ArrowUp size={13} /></button>
+                      <button className="btn btn-secondary" style={{ padding: '2px 8px' }} disabled={i === questions.length - 1} onClick={() => handleMove(q.id, 'down')} aria-label="Move down"><ArrowDown size={13} /></button>
+                      <button className="btn btn-secondary" style={{ padding: '2px 8px' }} onClick={() => startEdit(q)}><Pencil size={13} /></button>
+                      <button className="btn btn-danger" style={{ padding: '2px 8px' }} onClick={() => handleDelete(q.id)}><Trash2 size={13} /></button>
+                    </div>
+                  )}
                 </div>
               ))}
               {questions.length === 0 && (

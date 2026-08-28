@@ -140,6 +140,9 @@ func (s *SQLTournamentStore) MoveSwapAdjudicatorAssignment(assignmentID, targetD
 	if roleOverride != "" {
 		role = roleOverride
 	}
+	if targetDebateID == "" {
+		targetDebateID = srcDebateID
+	}
 
 	if srcDebateID != targetDebateID {
 		if err := checkSameRound(tx, srcDebateID, targetDebateID); err != nil {
@@ -170,6 +173,84 @@ func (s *SQLTournamentStore) MoveSwapAdjudicatorAssignment(assignmentID, targetD
 	if err != nil {
 		return "", err
 	}
+	return roundID, tx.Commit()
+}
+
+// AddAdjudicatorToDebate adds an unallocated adjudicator into a debate with a specified role ('chair', 'panel', 'trainee').
+// Returns the round ID.
+func (s *SQLTournamentStore) AddAdjudicatorToDebate(debateID, adjudicatorID, role string) (string, error) {
+	if role == "" {
+		role = "panel"
+	}
+	if role != "chair" && role != "panel" && role != "trainee" {
+		return "", errors.New("invalid adjudicator role: must be 'chair', 'panel', or 'trainee'")
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	roundID, err := debateRoundID(tx, debateID)
+	if err != nil {
+		return "", err
+	}
+
+	// Check if the adjudicator is already assigned to any debate in this round
+	var dupes int
+	err = tx.QueryRow(`
+		SELECT COUNT(*)
+		FROM debate_adjudicators da
+		JOIN debates d ON da.debate_id = d.id
+		WHERE d.round_id = ? AND da.adjudicator_id = ?
+	`, roundID, adjudicatorID).Scan(&dupes)
+	if err != nil {
+		return "", err
+	}
+	if dupes > 0 {
+		return "", ErrAlreadyInDebate
+	}
+
+	assignmentID := uuid.New().String()
+	_, err = tx.Exec(
+		"INSERT INTO debate_adjudicators (id, debate_id, adjudicator_id, role) VALUES (?, ?, ?, ?)",
+		assignmentID, debateID, adjudicatorID, role,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	return roundID, tx.Commit()
+}
+
+// RemoveAdjudicatorFromDebate removes an adjudicator from a debate, returning them to the unallocated scratch pool.
+// Returns the round ID.
+func (s *SQLTournamentStore) RemoveAdjudicatorFromDebate(assignmentID string) (string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	var debateID string
+	err = tx.QueryRow("SELECT debate_id FROM debate_adjudicators WHERE id = ?", assignmentID).Scan(&debateID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrAssignmentNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+
+	roundID, err := debateRoundID(tx, debateID)
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := tx.Exec("DELETE FROM debate_adjudicators WHERE id = ?", assignmentID); err != nil {
+		return "", err
+	}
+
 	return roundID, tx.Commit()
 }
 

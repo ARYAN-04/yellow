@@ -235,6 +235,10 @@ func GenerateDraw(store db.TournamentStore, roundID string) error {
 	})
 
 	order := debateImportanceOrder(debatesToSave, ctx.points, ctx.roundOne, ctx.rnd)
+	venues, err := store.GetAvailableVenuesForRound(roundID)
+	if err == nil && len(venues) > 0 {
+		AllocateVenues(order, debatesToSave, venues)
+	}
 	AllocatePanels(order, debatesToSave, adjudicators, ctx.cIdx, ctx.teamInstMap)
 
 	if err := store.SaveDraw(roundID, debatesToSave); err != nil {

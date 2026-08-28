@@ -11,12 +11,12 @@ interface AvailabilityRow {
   checked_in: boolean;
 }
 
-function EntityList({ title, rows, onToggle }: { title: string; rows: AvailabilityRow[]; onToggle: (row: AvailabilityRow) => void }) {
+function EntityList({ title, rows = [], onToggle }: { title: string; rows: AvailabilityRow[]; onToggle: (row: AvailabilityRow) => void }) {
   return (
     <div className="card" style={{ flex: 1, minWidth: '280px' }}>
       <h3>{title}</h3>
       <div style={{ maxHeight: '420px', overflowY: 'auto' }}>
-        {rows.map(row => (
+        {(rows || []).map(row => (
           <label key={row.entity_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.55rem 0', borderBottom: '1px solid var(--border)', cursor: 'pointer' }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <span>{row.name}</span>
@@ -31,7 +31,7 @@ function EntityList({ title, rows, onToggle }: { title: string; rows: Availabili
             />
           </label>
         ))}
-        {rows.length === 0 && (
+        {(!rows || rows.length === 0) && (
           <div style={{ padding: '1.5rem 0', color: 'var(--text-mute)', textAlign: 'center' }}>Nothing registered yet.</div>
         )}
       </div>

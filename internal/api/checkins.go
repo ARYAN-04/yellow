@@ -68,16 +68,20 @@ func (api *API) resolveCheckinTokenHelper(token string) (*models.CheckinTokenInf
 		return nil, "", os.ErrInvalid
 	}
 
-	files, err := os.ReadDir("tournaments")
+	rows, err := api.GlobalDB.Query("SELECT slug FROM tournaments")
 	if err != nil {
 		return nil, "", err
 	}
-
-	for _, file := range files {
-		if file.IsDir() || !strings.HasSuffix(file.Name(), ".db") || file.Name() == "global.db" {
-			continue
+	var slugs []string
+	for rows.Next() {
+		var slug string
+		if err := rows.Scan(&slug); err == nil {
+			slugs = append(slugs, slug)
 		}
-		slug := strings.TrimSuffix(file.Name(), ".db")
+	}
+	rows.Close()
+
+	for _, slug := range slugs {
 		tdb, err := api.DBMgr.Get(slug)
 		if err != nil {
 			continue

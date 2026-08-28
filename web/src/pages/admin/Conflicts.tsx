@@ -44,7 +44,8 @@ function EntityPicker({ label, types, entityType, onTypeChange, entityId, onEnti
 
 export default function Conflicts() {
   const { slug } = useParams<{ slug: string }>();
-  const { isReadOnly } = useOutletContext<AdminContext>();
+  const { isReadOnly, isAssistant } = useOutletContext<AdminContext>();
+  const isRestricted = isReadOnly || isAssistant;
 
   const [conflicts, setConflicts] = useState<any[]>([]);
   const [teams, setTeams] = useState<any[]>([]);
@@ -117,7 +118,7 @@ export default function Conflicts() {
         Declared clashes between adjudicators, teams, speakers, or institutions. Hard conflicts are avoided strictly during draw pairing; soft conflicts are minimized.
       </p>
 
-      {!isReadOnly && (
+      {!isRestricted && (
         <form onSubmit={handleCreate} className="card" style={{ maxWidth: '720px', marginBottom: '1.25rem' }}>
           <h3>Add Conflict</h3>
           <EntityPicker
@@ -165,7 +166,7 @@ export default function Conflicts() {
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                 {weightBadge(c.weight)}
-                {!isReadOnly && (
+                {!isRestricted && (
                   <button className="btn btn-danger" style={{ padding: '2px 8px', fontSize: '0.75rem' }} onClick={() => handleDelete(c.id)}>
                     <Trash2 size={13} />
                   </button>
