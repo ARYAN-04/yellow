@@ -1,4 +1,4 @@
-# Yellow (Tabbycat-Go)
+# Yellow
 
 Yellow is a modern rebuild of the Tabbycat tournament tab software in Go, utilizing a per-tournament SQLite database architecture, a pure Go build pipeline (zero CGO toolchain requirements), and a React SPA compiled directly into a single static binary.
 
